@@ -123,6 +123,7 @@ export const WORKSPACE_BLOCKS: WorkspaceBlock[] = [
   { id: 'noise', label: 'Noise reduction', category: 'Tools', section: 'noise', recipeFields: ['noiseReduction', 'profiledDenoise'], fields: noise.map(d => d.id) },
   { id: 'lens', label: 'Lens corrections', category: 'Tools', section: 'lens', recipeFields: ['lens'], fields: lens.map(d => d.id) },
   { id: 'transform', label: 'Transform', category: 'Tools', section: 'transform', recipeFields: ['transform'], fields: transform.map(d => d.id) },
+  { id: 'masks', label: 'Masks', category: 'Tools', section: 'masks', recipeFields: ['masks'], fields: [] },
   { id: 'detail-order', label: 'Detail processing order', category: 'Tools', fields: [] },
   { id: 'grain-speed', label: 'Film speed presets', category: 'Tools', fields: [] },
 ];
@@ -136,6 +137,7 @@ export function controlConflict(id: string, used: string[]): string | undefined 
 }
 
 export function workspaceControlChanged(id: string, recipe: Recipe, context: ControlContext): boolean {
+  if (id === 'masks') return recipe.masks.length > 0;
   const slider = workspaceSlider(id);
   if (slider) return Math.abs(slider.value(recipe, context) - slider.fallback(recipe, context)) > 1e-8;
   const block = workspaceBlock(id);

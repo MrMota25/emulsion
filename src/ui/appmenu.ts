@@ -18,6 +18,9 @@ import { setWorkspace, useWorkspace, type WorkspacePreferences } from './workspa
 import { firstOf, openSettings, openShortcuts, viewCommand, type ViewCommand } from './menubridge';
 import { logToTerminal, showLog } from '../backend/api';
 import { canTrash } from './RemovePhotosDialog';
+import { useControlWorkspace } from './controlworkspace';
+import { useTemporaryMasks, workspaceMaskToolActive } from './maskworkspace';
+import { useMaskUi } from './maskui';
 
 export const RECENT_PREFIX = 'recent:';
 const COLUMNS = [1, 2, 3] as const;
@@ -29,7 +32,7 @@ const NEEDS_SIZE: ToolId[] = ['crop', 'transform', 'heal', 'remove'];
 /** What the toolbar shows as held, for the Photo menu's ticks. */
 function heldTool(s: State, workspace: WorkspacePreferences): ToolId {
   const ui = useRetouchUi.getState();
-  return activeTool(useTools.getState(), !!s.cropEdit, s.picking, workspace.group === 'masks', ui.on, ui.on && retouchMode(ui) === 'remove');
+  return activeTool(useTools.getState(), !!s.cropEdit, s.picking, workspaceMaskToolActive(workspace), ui.on, ui.on && retouchMode(ui) === 'remove');
 }
 
 /** A dialog that owns the keyboard is open, so menu actions on photos wait. */
@@ -324,7 +327,7 @@ export async function installAppMenu(run: (id: string) => void): Promise<() => v
       void recent.setEnabled(recentFolders().length > 0 && !lookEdit).catch(() => {});
     }
   }
-  const stops = [useApp.subscribe(sync), usePrefs.subscribe(sync), useWorkspace.subscribe(sync),
+  const stops = [useApp.subscribe(sync), usePrefs.subscribe(sync), useWorkspace.subscribe(sync), useControlWorkspace.subscribe(sync), useTemporaryMasks.subscribe(sync), useMaskUi.subscribe(sync),
     useCatalog.subscribe(sync), useTools.subscribe(sync), useRetouchUi.subscribe(sync), onRecentFolders(() => { void fillRecent().catch(() => {}); })];
   return () => stops.forEach(stop => stop());
 }

@@ -6,7 +6,7 @@ import { CropBar } from './CropBar';
 import { activePhoto } from '../library/store';
 import { MOD } from './common';
 import { TOOLS, activeTool, chooseTool, useTools, type ToolId } from './tools';
-import { useWorkspace } from './workspace';
+import { useWorkspaceMaskToolActive } from './maskworkspace';
 import { retouchMode, useRetouchUi } from './retouchui';
 import { RetouchBar } from './RetouchBar';
 import { TransformBar } from './TransformControls';
@@ -41,7 +41,7 @@ export const PhotoTools = memo(function PhotoTools({ scale, zoomLabel, onZoom, o
   const cropping = useApp(s => !!s.cropEdit);
   const picking = useApp(s => s.picking);
   const canCrop = useApp(s => !!s.developSize && s.developSize.path === activePhoto(s)?.path);
-  const masksOpen = useWorkspace(s => s.group === 'masks');
+  const masksOpen = useWorkspaceMaskToolActive();
   const tools = useTools();
   const healing = useRetouchUi(s => s.on);
   const removing = useRetouchUi(s => retouchMode(s) === 'remove');

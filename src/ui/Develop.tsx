@@ -5,6 +5,7 @@ import { photoId } from '../library/copies';
 import { PhotoInfo } from './PhotoInfo';
 import { PhotoTools } from './PhotoTools';
 import { useWorkspace } from './workspace';
+import { useWorkspaceMasksOpen, useWorkspaceMaskToolActive } from './maskworkspace';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { Histogram } from '../engine/histogram';
 import { activeTool, chooseTool, toolHint, useTools } from './tools';
@@ -110,8 +111,9 @@ export function Develop() {
   const editingLook = useApp(s => !!s.lookEdit);
   // The Look Creator has its own layout around the preview, whichever layout the editor uses.
   const workflow = useWorkspace(s => s.layout === 'workflow') && !editingLook;
-  // Masks are edited on the photo while their controls are open (always, in Classic).
-  const masksOpen = useWorkspace(s => s.layout !== 'workflow' || s.group === 'masks');
+  // Masks can be edited on the photo while their controls are shown in this workspace.
+  const masksOpen = useWorkspaceMasksOpen();
+  const maskToolActive = useWorkspaceMaskToolActive();
   const boxRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
@@ -220,7 +222,7 @@ export function Develop() {
   const showScale = useRetouchUi((s) => (s.showScale && s.settings.tool !== 'remove' ? s.settings.scale : 0));
   const removeRetry = useRemoveUi(s => s.retry);
   useEffect(() => { if (frameId && removeRetry) engineRef.current?.retryRemovals(frameId); }, [removeRetry, engineReady]);
-  const tool = workflow ? activeTool(tools, cropping, picking, masksOpen, healing, removing) : 'select';
+  const tool = workflow ? activeTool(tools, cropping, picking, maskToolActive, healing, removing) : 'select';
   useEffect(() => { if (!masksOpen) setMaskUi({ tool: null, pick: null }); }, [masksOpen]);
 
   // Start the GPU engine for this canvas (in a worker: ui/developclient.ts).

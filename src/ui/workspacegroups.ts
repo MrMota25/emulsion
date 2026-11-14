@@ -18,6 +18,7 @@ export const WORKSPACE_GROUPS: WorkspaceGroupDefinition[] = [
   { id: 'noise', name: 'Noise reduction', icon: 'waves', controls: WORKSPACE_SLIDERS.filter(d => d.category === 'Noise reduction').map(d => d.id) },
   { id: 'lens', name: 'Lens corrections', icon: 'aperture', controls: ['lens-tools', ...WORKSPACE_SLIDERS.filter(d => d.category === 'Lens corrections').map(d => d.id)] },
   { id: 'transform', name: 'Transform', icon: 'focus', controls: ['transform-tools', ...WORKSPACE_SLIDERS.filter(d => d.category === 'Transform').map(d => d.id)] },
+  { id: 'masks', name: 'Masks', icon: 'layers', controls: ['masks'] },
 ];
 export const workspaceGroup = (id: string) => WORKSPACE_GROUPS.find(g => g.id === id);
 const controlLabels: Record<string, string> = { 'look-picker': 'Look picker', 'grading-wheel': 'Colour wheel', 'lens-tools': 'Profile and correction switches', 'transform-tools': 'Auto correction and crop constraint' };

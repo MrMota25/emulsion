@@ -8,7 +8,10 @@ import { defaultRecipe } from '../../src/film/recipe';
 import { activePhoto, useApp } from '../../src/library/store';
 import { addControlWorkspace, CONTROL_WORKSPACE_KEY, defaultControlWorkspace, saveControlWorkspace, useControlWorkspace } from '../../src/ui/controlworkspace';
 import { WORKSPACE_GROUPS } from '../../src/ui/workspacegroups';
-import { setWorkspace } from '../../src/ui/workspace';
+import { setWorkspace, useWorkspace } from '../../src/ui/workspace';
+import { chooseTool } from '../../src/ui/tools';
+import { workspaceMasksOpen } from '../../src/ui/maskworkspace';
+import { useMaskUi } from '../../src/ui/maskui';
 import '../../src/styles.css';
 import '@fontsource-variable/geist';
 
@@ -21,6 +24,8 @@ useApp.setState({ photos: [photo], active: 0, selected: new Set([photo.path]), v
 const look = new URLSearchParams(location.search).get('look');
 if (new URLSearchParams(location.search).get('theme') === 'light') document.documentElement.dataset.theme = 'light';
 const layout = defaultControlWorkspace();
+if (look === 'temporary-masks') layout.groups[0].sections = layout.groups[0].sections.filter(s => s.source !== 'masks');
+if (look === 'masks') layout.groups[0].sections = layout.groups[0].sections.filter(s => s.source === 'masks');
 if (look === 'multi') {
   const finish = layout.groups[0].sections.filter(s => ['optics', 'grain', 'detail', 'lens', 'noise'].includes(s.source));
   layout.groups[0].sections = layout.groups[0].sections.filter(s => !finish.includes(s));
@@ -64,11 +69,41 @@ try {
   await wait(300);
   assert(document.querySelector('.personal-workspace'), 'Personal sidebar did not render');
   assert(!!document.querySelector('.personal-group-tabs') === (look === 'multi'), 'One tab should have no tab bar; many tabs should');
-  if (look === 'newshot') { await openWorkspaceMenu(); menuItem('New workspace…').click(); await wait(); document.body.dataset.result = 'PASS: new workspace editor'; }
+  if (look === 'temporary-masks') { chooseTool('mask'); await wait(); assert(document.querySelector('[aria-label="Masks (temporary)"]') && document.querySelector('.mask-tools'), 'Temporary Masks did not render'); document.body.dataset.result = 'PASS: temporary Masks in personal workspace'; }
+  else if (look === 'masks') { assert(document.querySelector('#section-personal-group-masks .mask-tools'), 'Personal Masks did not render'); document.body.dataset.result = 'PASS: Masks group in personal workspace'; }
+  else if (look === 'newshot') { await openWorkspaceMenu(); menuItem('New workspace…').click(); await wait(); document.body.dataset.result = 'PASS: new workspace editor'; }
   else if (look === 'menu') { if (new URLSearchParams(location.search).has('two')) addControlWorkspace('Travel', defaultControlWorkspace()); await openWorkspaceMenu(); assert(document.activeElement === document.querySelector('.workspace-menu-list [aria-checked=true]'), 'Menu did not focus the current workspace'); document.body.dataset.result = 'PASS: workspace menu open'; }
   else if (look === 'single' || look === 'multi' || look === 'wheel') document.body.dataset.result = 'PASS: existing groups in personal sidebar';
   else {
+    const original = structuredClone(useControlWorkspace.getState());
+    const withoutMasks = structuredClone(original);
+    withoutMasks.groups.forEach(g => { g.sections = g.sections.filter(s => s.source !== 'masks'); });
+    saveControlWorkspace(withoutMasks); await wait();
+    chooseTool('mask'); await wait();
+    assert(useWorkspace.getState().group === 'custom', 'Mask tool left the custom workspace when Masks was omitted');
+    assert(document.querySelector('[aria-label="Masks (temporary)"]') && document.querySelector('.mask-tools'), 'Missing temporary Masks tab');
+    assert(workspaceMasksOpen(), 'Temporary Masks tab did not enable canvas mask editing');
+    assert(JSON.stringify(useControlWorkspace.getState()) === JSON.stringify(withoutMasks), 'Temporary Masks changed the saved layout');
+    await click('Linear gradient');
+    assert(useMaskUi.getState().tool?.kind === 'gradient', 'Temporary mask controls cannot select a drawing tool');
+    chooseTool('select'); await wait();
+    assert(!document.querySelector('[aria-label="Masks (temporary)"]') && !workspaceMasksOpen() && !useMaskUi.getState().tool, 'Leaving Mask did not restore the personal tab and clear its drawing tool');
+    await customize(); await change('Search groups', 'mask');
+    assert(document.querySelector('.workspace-library-group[aria-label="Add Masks to My workspace"]'), 'Masks is missing from the custom workspace group library');
+    await click('Tab'); await change('Tab name', 'Local edits');
+    await click('Add Masks to Local edits'); await click('Save workspace');
+    assert(document.querySelector('#section-personal-group-masks .mask-tools') && workspaceMasksOpen(), 'Added Masks group did not render working mask controls');
+    await click('My workspace');
+    assert(!workspaceMasksOpen(), 'Leaving the Masks tab kept canvas mask editing enabled');
+    chooseTool('mask'); await wait();
+    assert(useWorkspace.getState().group === 'custom' && useControlWorkspace.getState().groups.find(g => g.id === useControlWorkspace.getState().active)?.name === 'Local edits', 'Mask tool did not open the personal tab containing Masks');
+    assert(!document.querySelector('[aria-label="Masks (temporary)"]'), 'Mask tool ignored the existing Masks group');
+    chooseTool('select'); await wait();
+    assert(useControlWorkspace.getState().active === withoutMasks.active, 'Leaving Mask did not return to the previous personal tab');
+    assert(activePhoto()!.recipe === recipe, 'Mask workspace navigation edited the photo');
+    saveControlWorkspace(original); await wait();
     await customize(); await configure('Exposure');
+    assert([...document.querySelectorAll('.workspace-library-group')].some(el => el.textContent?.includes('Masks')), 'Masks is missing from the custom workspace group library');
     assert(document.querySelector<HTMLDialogElement>('.workspace-editor')?.open, 'Editor did not open');
     assert(document.querySelectorAll('.workspace-library-group').length === WORKSPACE_GROUPS.length, 'Library should offer existing groups');
     assert(!document.querySelector('.workspace-new-section, .workspace-draft-controls'), 'Freeform group/slider composition is still offered');

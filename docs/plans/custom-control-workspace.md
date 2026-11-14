@@ -10,7 +10,7 @@ several tabs. The standard workspace remains available.
 
 - **Customize…** opens a protected draft. The left library offers existing groups:
   Look, White Balance, Exposure, High Dynamic Range, Tone curve, HSL, Colour
-  wheels, Detail, Optics, Grain, Noise reduction, Lens corrections and Transform.
+  wheels, Detail, Optics, Grain, Noise reduction, Lens corrections, Transform and Masks.
   Searching a slider name finds its containing group.
 - Add an entire group with its controls already included. A group already on a
   different tab can **Move here**, preserving its heading, icon and visibility.
@@ -43,7 +43,12 @@ technology.
 White-balance presets, the Look picker, lens switches and automatic perspective
 tools remain available within their established groups. Controls with enabling
 dependencies keep actionable setup or explanations. Mask-local controls remain
-within the mask tool; the standard Masks, Presets and Metadata tabs are retained.
+within the mask tool; Masks can be placed as a group on any personal tab, including
+a dedicated Masks tab. The toolbar's Mask tool opens the personal tab containing
+visible mask controls. If no such group is shown, it opens a temporary Masks tab
+inside the current workspace without changing the saved layout. Putting the tool
+down returns to the previous personal tab. The standard Masks, Presets and Metadata
+tabs are retained.
 
 ## Persistence and migration
 
