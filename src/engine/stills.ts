@@ -40,7 +40,7 @@ export type FromStills =
   /** The GPU context was lost: every source and pending render is gone, so the client starts a new engine. */
   | { type: 'lost' }
   | { type: 'reply'; id: number; ok: true; value: Uint8Array | Uint16Array | Blob | RemoveInput | null }
-  | { type: 'reply'; id: number; ok: false; error: string };
+  | { type: 'reply'; id: number; ok: false; error: string; stack?: string };
 
 export class StillRenderer {
   readonly engine: Engine;
@@ -73,7 +73,7 @@ export class StillRenderer {
   /** Reply with an error, telling the client first when it came from a lost GPU context. */
   private fail(id: number, err: unknown) {
     if (this.engine.gpu?.gl.isContextLost?.()) this.markLost();
-    this.post({ type: 'reply', id, ok: false, error: String(err) });
+    this.post({ type: 'reply', id, ok: false, error: String(err), stack: err instanceof Error ? err.stack : undefined });
   }
 
   handle(m: ToStills) {

@@ -48,7 +48,8 @@ it('fails a render whose source was released before its turn', async () => {
   r.handle({ type: 'render', id: 3, key: 1, recipe: null, w: 4, h: 2, seed: 0, removal: null });
   r.handle({ type: 'release', key: 1 });
   await flush();
-  expect(replies).toEqual([{ type: 'reply', id: 3, ok: false, error: 'Error: source released' }]);
+  expect(replies).toMatchObject([{ type: 'reply', id: 3, ok: false, error: 'Error: source released',
+    stack: expect.stringContaining('StillRenderer.source') }]);
 });
 
 it('prepares a Remove input in the queue, with the context set for each pass, and can be canceled', async () => {

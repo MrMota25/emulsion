@@ -2,9 +2,11 @@ import { removeSetup, type RemoveContext } from './removequeue';
 import { prepareHeal } from './healkernel';
 import type { PatchRequest } from './remove';
 import noiseShader from './shaders/noise.frag.glsl?raw';
+import tileCopyShader from './shaders/tilecopy.frag.glsl?raw';
+import { SpatialTiles, SPATIAL_TILE_PIXELS, SPATIAL_TILE_CORE } from './spatialtiles';
 import { RESAMPLE_MIN_SCALE, resampledSize } from './resample';
 import { effectiveProfiled, noiseEnabled, profiledEnabled } from '../film/noisereduction';
-import { ProfiledDenoiser } from './denoisegpu';
+import { ProfiledDenoiser, type Tile } from './denoisegpu';
 import { denoiseSetup, domainMatrices, GENERIC_NOISE, wbFromNeutral, type DenoiseSetup } from './denoiseprofile';
 import { RetouchCache, reducedRegion, retouchReduced, retouchInputs, type RetouchSetup, type Roi } from './retouch';
 import { BrushGpu, brushShapes, brushSize } from './brushgpu';
@@ -347,6 +349,8 @@ class Lane {
   ceDisplayDeltaMade: Lane['ceMade'] = null;
   /** A look's colour equalizer instance (before the photo's): its output, in ce.t[5], and what it was made from. */
   ceLookMade: { tex: WebGLTexture; key: string } | null = null;
+  ceTiles: SpatialTiles | null = null;
+  usmTiles: SpatialTiles | null = null;
   /** Bounded live colour keeps its working images when the exact preview is rendered. */
   ceDraft: ColorCache | null = null;
   noiseMade: { input: WebGLTexture; amount: number; out: Target } | null = null;
@@ -405,6 +409,9 @@ const to16 = (v: number) => Math.round(Math.min(1, Math.max(0, v)) * 65535);
 
 export class Engine {
   readonly gpu: Gpu;
+  /** Admission/core budget for exact local-filter scratch; overridable by the GPU probe. */
+  spatialTilePixels = SPATIAL_TILE_PIXELS;
+  private tileCopyP: Program;
   captureWork: CaptureWork = { builds: 0, hits: 0, steps: 0, cpuMs: 0, elapsedMs: 0, thresholdMs: 0 };
   /** One full-resolution result, independent of preview/histogram lane ownership. */
   cacheCapture = true;
@@ -542,6 +549,7 @@ export class Engine {
   constructor(canvas: HTMLCanvasElement | OffscreenCanvas) {
     void prepareHeal();
     this.gpu = new Gpu(canvas);
+    this.tileCopyP = this.gpu.program(SHADERS.vertex, tileCopyShader);
     this.noiseP = this.gpu.program(SHADERS.vertex, noiseShader);
     this.lensP = this.gpu.program(SHADERS.vertex, SHADERS.lenscorrect);
     this.develop = this.gpu.program(SHADERS.vertex, SHADERS.develop);
@@ -766,6 +774,7 @@ export class Engine {
     if (L.printGroup) g.freePair(L.printGroup.t);
     L.printGroup = L.printMade = null;
     if (L.ce) { g.freePair(L.ce.pair); L.ce.t.forEach((t) => g.free(t)); }
+    L.ceTiles?.release(); L.usmTiles?.release();
     if (L.ceDraft?.ce) { g.freePair(L.ceDraft.ce.pair); L.ceDraft.ce.t.forEach((t) => g.free(t)); }
     L.ceDraft = null;
     if (L.ceDelta) g.free(L.ceDelta);
@@ -1614,6 +1623,9 @@ export class Engine {
   }
 
   private dropLaneBuffers(w: number, h: number) {
+    // Tiled outputs belong to the source render, rather than the scratch tile's dimensions.
+    if (this.L.ceTiles?.releaseSize(w, h)) this.L.ceMade = null;
+    if (this.L.usmTiles?.releaseSize(w, h)) this.L.usmMade = null;
     for (const [slot, b] of this.L.textureBoundaries) if (b.source.w === w && b.source.h === h) {
       this.gpu.free(b.target); this.L.textureBoundaries.delete(slot);
     }
@@ -1895,15 +1907,23 @@ export class Engine {
   }
 
   /** Sharpening's two 32-bit targets for a w × h source, made on first use (one size at a time). */
+  private freeUsmTargets(usm: Lane['usm']) {
+    if (usm) [usm.a, usm.b].forEach(t => this.gpu.free(t));
+  }
+
+  private freeColorTargets(ce: Lane['ce']) {
+    if (ce) { this.gpu.freePair(ce.pair); ce.t.forEach(t => this.gpu.free(t)); }
+  }
+
   private usmTargets(w: number, h: number) {
     if (!this.L.usm || this.L.usm.w !== w || this.L.usm.h !== h) {
-      if (this.L.usm) {
-        this.gpu.free(this.L.usm.a);
-        this.gpu.free(this.L.usm.b);
-      }
-      this.L.usm = { w, h, a: this.gpu.target(w, h, true, true), b: this.gpu.target(w, h, true, true) };
+      this.freeUsmTargets(this.L.usm);
+      this.L.usm = null;
       this.L.usmMade = null;
       this.L.printMade = null;
+      const a = this.gpu.target(w, h, true, true);
+      try { this.L.usm = { w, h, a, b: this.gpu.target(w, h, true, true) }; }
+      catch (error) { this.gpu.free(a); throw error; }
     }
     return this.L.usm;
   }
@@ -1917,7 +1937,27 @@ export class Engine {
     return this.drain(this.usmSteps(w, h, p, kernel, drawInput));
   }
 
-  private *usmSteps(w: number, h: number, p: UsmParams, kernel: number[], drawInput: (t: Target) => void): Generator<void, Target> {
+  private *usmSteps(w: number, h: number, p: UsmParams, kernel: number[], drawInput: (t: Target) => void, scratch = false): Generator<void, Target> {
+    if (!scratch && w * h > this.spatialTilePixels) {
+      const L = this.L, saved = L.usm, clip = this.gpu.clip;
+      L.usmMade = null;
+      L.usm = null;
+      const tiles = L.usmTiles ??= new SpatialTiles(this.gpu, this.tileCopyP);
+      const reach = (kernel.length - 1) / 2 + (gaussian1d(2).length - 1) / 2 + 2;
+      try {
+        this.gpu.clip = null;
+        return yield* tiles.render(w, h, reach, Math.min(SPATIAL_TILE_CORE, Math.floor(Math.sqrt(this.spatialTilePixels))), false,
+          function* (this: Engine, tile: Tile) {
+            return yield* this.usmSteps(tile.pw, tile.ph, p, kernel, t => {
+              t.area = { x: tile.px, y: tile.py, w: tile.pw, h: tile.ph, fullW: w, fullH: h };
+              drawInput(t);
+            }, true);
+          }.bind(this));
+      } finally {
+        this.freeUsmTargets(L.usm);
+        L.usm = saved; this.gpu.clip = clip;
+      }
+    }
     const g = this.gpu;
     const { a, b } = this.usmTargets(w, h);
     const m = gaussian1d(2);
@@ -1943,15 +1983,16 @@ export class Engine {
   /** The colour equalizer's targets for a w × h source, made on first use (one size at a time). */
   private ceTargets(w: number, h: number) {
     if (!this.L.ce || this.L.ce.w !== w || this.L.ce.h !== h) {
-      if (this.L.ce) {
-        this.gpu.freePair(this.L.ce.pair);
-        this.L.ce.t.forEach((t) => this.gpu.free(t));
-      }
-      const t = Array.from({ length: 5 }, () => this.gpu.target(w, h, true, true));
-      // Steps 0 and 4 write targets 1 and 2 together.
-      this.L.ce = { w, h, t, pair: this.gpu.pair(t[1], t[2]) };
+      this.freeColorTargets(this.L.ce);
+      this.L.ce = null;
       this.L.ceScene = null; this.L.ceLookMade = null;
       this.L.ceMade = null;
+      const t: Target[] = [];
+      try {
+        for (let i = 0; i < 5; i++) t.push(this.gpu.target(w, h, true, true));
+        // Steps 0 and 4 write targets 1 and 2 together.
+        this.L.ce = { w, h, t, pair: this.gpu.pair(t[1], t[2]) };
+      } catch (error) { t.forEach(target => this.gpu.free(target)); throw error; }
     }
     return this.L.ce.t;
   }
@@ -1982,6 +2023,38 @@ export class Engine {
    */
   private colorEqMap(w: number, h: number, roi: number, color: ColorAdjust, u: Uniforms, drawInput: (t: Target) => void, scene?: { tex: WebGLTexture; key: string } | null, into?: Target): Target {
     return this.drain(this.colorEqSteps(w, h, roi, color, u, drawInput, scene, into));
+  }
+
+  /** Consecutive colour instances on padded tiles, with the existing 32-bit port unchanged. */
+  private *colorEqTiles(w: number, h: number, roi: number, colors: ColorAdjust[], u: Uniforms, drawInput: (t: Target) => void): Generator<void, Target> {
+    const L = this.L, g = this.gpu, clip = g.clip;
+    L.ceMade = null;
+    const saved: ColorCache = { ce: L.ce, ceScene: L.ceScene, ceMade: L.ceMade, ceLookMade: L.ceLookMade };
+    L.ce = null; L.ceScene = L.ceMade = L.ceLookMade = null;
+    const tiles = L.ceTiles ??= new SpatialTiles(g, this.tileCopyP);
+    try {
+      g.clip = null;
+      // darktable colorequal's overlap (also used by regionReach), per sequential instance.
+      return yield* tiles.render(w, h, 20 * colors.length, Math.min(SPATIAL_TILE_CORE, Math.floor(Math.sqrt(this.spatialTilePixels))), true,
+        function* (this: Engine, tile: Tile) {
+          let out: Target | null = null;
+          for (const color of colors) {
+            const previous: Target | null = out;
+            const into: Target | undefined = colors.length > 1 && !previous ? this.ceLookTarget(tile.pw, tile.ph) : undefined;
+            out = yield* this.colorEqSteps(tile.pw, tile.ph, roi, color, u, t => {
+              if (previous) this.ceAnalyseFrom(previous, t);
+              else {
+                t.area = { x: tile.px, y: tile.py, w: tile.pw, h: tile.ph, fullW: w, fullH: h };
+                drawInput(t);
+              }
+            }, null, into);
+          }
+          return out!;
+        }.bind(this));
+    } finally {
+      this.freeColorTargets(L.ce);
+      Object.assign(L, saved); g.clip = clip;
+    }
   }
 
   private *colorEqSteps(w: number, h: number, roi: number, color: ColorAdjust, u: Uniforms, drawInput: (t: Target) => void, scene?: { tex: WebGLTexture; key: string } | null, into?: Target): Generator<void, Target> {
@@ -3178,7 +3251,7 @@ export class Engine {
       : pxScale(src);
     const usmKern = usmKernel(usmP.radius * usmScale);
     const usmOn = !picking && passes.usm && g.hdr && g.float32 && usmKern.length > 1;
-    if (usmOn && !directPreview) {
+    if (usmOn && !directPreview && src.w * src.h <= this.spatialTilePixels) {
       if (!this.L.usm || this.L.usm.w !== src.w || this.L.usm.h !== src.h)
         yield* this.reserveSteps(Array.from({ length: 2 }, (): SpareSpec => [src.w, src.h, true, true, false]));
       this.usmTargets(src.w, src.h);
@@ -3288,6 +3361,7 @@ export class Engine {
 
     let usm: WebGLTexture = g.blackTexture;
     let ceTex: WebGLTexture = g.blackTexture;
+    let ceBlue: WebGLTexture = g.blackTexture;
     let ceMode = ceOn ? 1 : 0;
     const bindDevelop = (clarity: WebGLTexture) => {
       g.bind(0, src.tex);
@@ -3301,6 +3375,7 @@ export class Engine {
       g.bind(8, texture);
       g.bind(9, usm);
       g.bind(10, ceTex);
+      g.bind(14, ceBlue);
       g.bind(DEHAZE_UNIT, dehaze);
       g.bind3d(LUT_UNIT, lutTex);
     };
@@ -3308,7 +3383,8 @@ export class Engine {
     const tap = (t: Target, uTap: number, extra: Uniforms) => {
       this.develop.set({
         ...u, ...teqU, uSrc: 0, uBlurTex: 1, uHalTex: 2, uGlowTex: 3, uClarityTex: 6, uTextureTex: 8, uUsmTex: 9,
-        uDehazeTex: DEHAZE_UNIT, uView: [0, 0, 1, 1], ...tapGeo, uSplit: -1, uClipShow: 0, uUsmOn: 0, uUsmShowMask: 0, uCeTex: 10, uCeOn: ceMode, uTap, ...extra,
+        uDehazeTex: DEHAZE_UNIT, uView: t.area ? [t.area.x / t.area.fullW, t.area.y / t.area.fullH, t.area.w / t.area.fullW, t.area.h / t.area.fullH] : [0, 0, 1, 1], ...tapGeo,
+        uSplit: -1, uClipShow: 0, uUsmOn: 0, uUsmShowMask: 0, uCeTex: 10, uCeBlue: 14, uCeSplit: ceBlue !== g.blackTexture ? 1 : 0, uCeOn: ceMode, uTap, ...extra,
       });
       g.bindArray(MASK_UNIT, maskTex);
       g.draw(this.develop, t, t.w, t.h);
@@ -3418,7 +3494,9 @@ export class Engine {
     // Live regional colour comes from the preview too, even when Clarity is held or absent.
     // Exact products still skip colour when nothing reads it.
     const ceNeeded = ceOn && !(opts.products && clarityReused && !colorDraft);
-    if (ceNeeded && this.L.ceMade?.tex === src.tex && this.L.ceMade.key === ceKey) ceTex = this.L.ceMade.out.tex;
+    if (ceNeeded && this.L.ceMade?.tex === src.tex && this.L.ceMade.key === ceKey) {
+      ceTex = this.L.ceMade.out.tex; ceBlue = this.L.ceMade.out.blue?.tex ?? g.blackTexture;
+    }
     else if (ceNeeded && previewColor) {
       ceTex = previewColor;
       ceMode = 2;
@@ -3432,7 +3510,10 @@ export class Engine {
         tap(t, 4, { uTextureOn: eqOn ? 1 : 0, uClarityOn: 0, uCeOn: 0 });
       };
       let out: Target;
-      if (lookColor) {
+      if (colorW * colorH > this.spatialTilePixels) {
+        const colors = [lookColor, recipe?.color].filter((c): c is ColorAdjust => !!c);
+        out = yield* this.colorEqTiles(colorW, colorH, colorScale, colors, u, analyseScene);
+      } else if (lookColor) {
         // The look's instance first, kept in its own target while the photo's own HSL changes.
         const lookOut = this.ceLookTarget(colorW, colorH);
         const made = `${ceSceneKey}|${pick(u, COLOR_STAGE)}|${lookKey}`;
@@ -3446,6 +3527,7 @@ export class Engine {
       } else out = yield* this.colorEqSteps(colorW, colorH, colorScale, recipe!.color!, u, analyseScene, { tex: src.tex, key: ceSceneKey });
       this.L.ceMade = { tex: src.tex, key: ceKey, out };
       ceTex = out.tex;
+      ceBlue = out.blue?.tex ?? g.blackTexture;
     }
     if (opts.products && colorDraft) {
       const L = this.L;
@@ -3506,7 +3588,7 @@ export class Engine {
         } else if (slot < 0) {
           // With Sharpening on, keep the print too, for Sharpening's input (tap 11).
           // Not while warming: that would take usm.b from Sharpening's map, which stays as it is.
-          const keep = usmOn && this.resumeSharpen && !opts.warm;
+          const keep = usmOn && this.resumeSharpen && !opts.warm && !!this.L.usm && this.L.usm.w === src.w && this.L.usm.h === src.h;
           tap(keep ? this.printTarget(t) : t, 1, { uTextureOn: eqOn ? 1 : 0, uClarityOn: 0 });
           this.L.printMade = keep ? { tex: src.tex, key: llKey } : null;
           // usm.b held Sharpening's map; it holds the print now.
@@ -3534,7 +3616,7 @@ export class Engine {
       // The mask's input: the finished print's lightness at every source pixel, uncropped.
       const out = yield* this.usmSteps(src.w, src.h, usmP, usmKern, (t) => {
         bindDevelop(clarity);
-        const print = this.L.printMade?.tex === src.tex && this.L.printMade.key === llKey;
+        const print = !t.area && this.L.printMade?.tex === src.tex && this.L.printMade.key === llKey;
         if (print) g.bind(0, this.L.usm!.b.tex);
         tap(t, print ? 11 : 3, { uTextureOn: eqOn ? 1 : 0, uClarityOn: ll ? 1 : 0 });
       });
@@ -3563,7 +3645,7 @@ export class Engine {
     }
     try {
       this.develop.set({
-      ...u, ...teqU, uSrc: 0, uBlurTex: 1, uHalTex: 2, uGlowTex: 3, uClarityTex: 6, uTextureTex: 8, uUsmTex: 9, uCeTex: 10, uDehazeTex: DEHAZE_UNIT, uCeOn: displayColor ? 2 : ceMode, uCeRoi: displayColor ? [0, 0, 1, 1] : u.uCeRoi ?? [0, 0, 1, 1], uTap: 0, uClarityOn: ll || previewClarity ? 1 : 0, uTextureOn: eqOn ? 1 : 0,
+      ...u, ...teqU, uSrc: 0, uBlurTex: 1, uHalTex: 2, uGlowTex: 3, uClarityTex: 6, uTextureTex: 8, uUsmTex: 9, uCeTex: 10, uCeBlue: 14, uCeSplit: !displayColor && ceBlue !== g.blackTexture ? 1 : 0, uDehazeTex: DEHAZE_UNIT, uCeOn: displayColor ? 2 : ceMode, uCeRoi: displayColor ? [0, 0, 1, 1] : u.uCeRoi ?? [0, 0, 1, 1], uTap: 0, uClarityOn: ll || previewClarity ? 1 : 0, uTextureOn: eqOn ? 1 : 0,
       uUsmOn: usmOn ? 1 : 0, uUsmShowMask: usmOn && opts.sharpenMask ? 1 : 0,
       });
       g.bindArray(MASK_UNIT, maskTex);
@@ -3738,19 +3820,18 @@ export class Engine {
 
   /**
    * Develop into a 32-bit float target and read it back as 16-bit RGB (no alpha), top row first,
-   * for 16-bit TIFF and PNG export. Read in strips, so a 26 MP frame needs a ~50 MB float buffer at
-   * a time rather than 400 MB. The finish dither is one 16-bit step.
+   * for 16-bit TIFF and PNG export. Render and read in strips: neither the float target nor the
+   * readback buffer grows beyond ~48 MB. Analysis maps retain the original source's density.
    */
   async readPixels16Async(src: Source, recipe: Recipe | null, width: number, height: number, seed: number, frame?: Crop): Promise<Uint16Array<ArrayBuffer>> {
     const g = this.gpu, gl = g.gl;
     if (!g.hdr) throw new GpuError('16-bit export needs float render targets, which this GPU does not offer');
-    const out = g.target(width, height, true, true);
+    const rows = Math.max(1, Math.min(height, Math.floor((48 << 20) / (width * 16))));
+    const out = g.target(width, rows, true, true);
     const rgb = new Uint16Array(width * height * 3);
     const buffer = gl.createBuffer();
     try {
       if (!buffer) throw new GpuError('Could not allocate a pixel readback buffer');
-      this.render(src, recipe, { target: out, width, height, seed, frame, dither: 1 / 65535 });
-      const rows = Math.max(1, Math.min(height, Math.floor((48 << 20) / (width * 16))));
       const strip = new Float32Array(width * rows * 4);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buffer);
       gl.bufferData(gl.PIXEL_PACK_BUFFER, strip.byteLength, gl.STREAM_READ);
@@ -3758,9 +3839,11 @@ export class Engine {
       const started = performance.now();
       for (let y0 = 0; y0 < height; y0 += rows) {
         const n = Math.min(rows, height - y0);
+        this.render(src, recipe, { target: out, width, height: rows, seed, frame, dither: 1 / 65535,
+          view: { x: 0, y: y0 / height, w: 1, h: rows / height } });
         gl.bindFramebuffer(gl.FRAMEBUFFER, out.fbo);
         gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buffer);
-        gl.readPixels(0, y0, width, n, gl.RGBA, gl.FLOAT, 0);
+        gl.readPixels(0, 0, width, n, gl.RGBA, gl.FLOAT, 0);
         const fence = gl.fenceSync(gl.SYNC_GPU_COMMANDS_COMPLETE, 0);
         gl.flush();
         gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);

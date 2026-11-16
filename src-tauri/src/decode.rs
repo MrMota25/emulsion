@@ -238,9 +238,11 @@ fn linear_f16_rgba_impl(img: &DynamicImage, preserve_negative: bool) -> Vec<u8> 
     let px = img.width() as usize * img.height() as usize;
     let mut out = vec![0u8; px * 8];
     match img {
-        DynamicImage::ImageRgb32F(_) | DynamicImage::ImageRgba32F(_) => {
-            // Float images are taken as already linear.
-            let src = img.to_rgba32f();
+        DynamicImage::ImageRgb32F(src) => {
+            // Borrow RGB directly: converting a 102 MP RAW to RGBA32F adds a 1.6 GB copy.
+            pack_rgb16f(&mut out, src, preserve_negative);
+        }
+        DynamicImage::ImageRgba32F(src) => {
             out.par_chunks_mut(8).zip(src.as_raw().par_chunks(4)).for_each(|(o, s)| {
                 for c in 0..3 {
                     o[c * 2..c * 2 + 2].copy_from_slice(&f16::from_f32(if preserve_negative { s[c] } else { s[c].max(0.0) }).to_bits().to_le_bytes());
@@ -273,6 +275,23 @@ fn linear_f16_rgba_impl(img: &DynamicImage, preserve_negative: bool) -> Vec<u8> 
         }
     }
     out
+}
+
+fn pack_rgb16f(out: &mut [u8], img: &image::Rgb32FImage, preserve_negative: bool) {
+    out.par_chunks_mut(8).zip(img.as_raw().par_chunks(3)).for_each(|(o, s)| {
+        for c in 0..3 {
+            let v = if preserve_negative { s[c] } else { s[c].max(0.0) };
+            o[c * 2..c * 2 + 2].copy_from_slice(&f16::from_f32(v).to_bits().to_le_bytes());
+        }
+        o[6..8].copy_from_slice(&ONE.to_le_bytes());
+    });
+}
+
+/// Append a borrowed scene-linear plane without an RGB/RGBA float clone or a second byte buffer.
+pub fn append_raw_pixels(out: &mut Vec<u8>, img: &image::Rgb32FImage) {
+    let start = out.len();
+    out.resize(start + img.width() as usize * img.height() as usize * 8, 0);
+    pack_rgb16f(&mut out[start..], img, true);
 }
 
 /// Header followed by pixels. The header is width, height, mode and flags as
@@ -317,26 +336,37 @@ pub fn load_for_engine(path: &Path, max_edge: Option<u32>) -> Result<Vec<u8>, St
 pub fn raw_for_engine(path: &Path, raw: raw::Decoded, max_edge: Option<u32>) -> Result<Vec<u8>, String> {
         let img = resize_to(raw.image, max_edge);
         let (w, h) = (img.width(), img.height());
-        let mut bytes = payload(w, h, InputMode::SceneLinear, raw.white, raw.full_size, vec![]);
-        if let Some(lens) = crate::lens::read(path).and_then(|mut m| { m.camera_to_working = Some(raw.camera_to_working); serde_json::to_vec(&m).ok() }) {
+        let mut bytes = raw_header(path, (w, h), raw.white, raw.full_size, &raw.camera, raw.frame)?;
+        bytes.reserve(w as usize * h as usize * 8);
+        if let DynamicImage::ImageRgb32F(image) = &img {
+            append_raw_pixels(&mut bytes, image);
+        } else {
+            bytes.extend_from_slice(&linear_f16_rgba_impl(&img, true));
+        }
+        Ok(bytes)
+}
+
+/// The same metadata for an owned decode or borrowed denoise-cache planes.
+pub fn raw_header(path: &Path, (w, h): (u32, u32), white: Option<[f32; 2]>, full_size: (u32, u32), camera: &raw::CameraMetadata, frame: Option<[f32; 4]>) -> Result<Vec<u8>, String> {
+        let mut bytes = payload(w, h, InputMode::SceneLinear, white, full_size, vec![]);
+        if let Some(lens) = crate::lens::read(path).and_then(|mut m| { m.camera_to_working = Some(camera.camera_to_working); serde_json::to_vec(&m).ok() }) {
             let flags = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) | 2;
             bytes[12..16].copy_from_slice(&flags.to_le_bytes());
             bytes.extend_from_slice(&(lens.len() as u32).to_le_bytes());
             bytes.extend_from_slice(&lens);
             while bytes.len() % 4 != 0 { bytes.push(0); }
         }
-        let camera = serde_json::to_vec(&raw.camera).map_err(|e| format!("Camera metadata: {e}"))?;
+        let camera = serde_json::to_vec(camera).map_err(|e| format!("Camera metadata: {e}"))?;
         let flags = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) | 4;
         bytes[12..16].copy_from_slice(&flags.to_le_bytes());
         bytes.extend_from_slice(&(camera.len() as u32).to_le_bytes());
         bytes.extend_from_slice(&camera);
         while bytes.len() % 4 != 0 { bytes.push(0); }
-        if let Some(frame) = raw.frame {
+        if let Some(frame) = frame {
             let flags = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) | 16;
             bytes[12..16].copy_from_slice(&flags.to_le_bytes());
             for v in frame { bytes.extend_from_slice(&v.to_le_bytes()); }
         }
-        bytes.extend_from_slice(&linear_f16_rgba_impl(&img, true));
         Ok(bytes)
 }
 
@@ -388,6 +418,20 @@ mod tests {
         let first=|bytes:Vec<u8>|f16::from_bits(u16::from_le_bytes([bytes[0],bytes[1]])).to_f32();
         assert_eq!(first(linear_f16_rgba_impl(&image,true)),-0.25);
         assert_eq!(first(linear_f16_rgba(&image)),0.0);
+    }
+
+    #[test]
+    fn borrowed_raw_planes_match_owned_packing_without_losing_the_prefix() {
+        let rgb = ImageBuffer::<Rgb<f32>, _>::from_raw(2, 2,
+            vec![-0.25, 0.2, 1.8, 4.0, -0.01, 0.0, 0.125, 0.5, 0.9, 2.0, -1.0, 0.01]).unwrap();
+        let rgba = DynamicImage::ImageRgb32F(rgb.clone()).to_rgba32f();
+        let expected = linear_f16_rgba_impl(&DynamicImage::ImageRgba32F(rgba), true);
+        let mut bytes = vec![1, 2, 3, 4];
+        append_raw_pixels(&mut bytes, &rgb);
+        append_raw_pixels(&mut bytes, &rgb);
+        assert_eq!(&bytes[..4], &[1, 2, 3, 4]);
+        assert_eq!(&bytes[4..4 + expected.len()], expected);
+        assert_eq!(&bytes[4 + expected.len()..], expected);
     }
 
     #[test]

@@ -74,7 +74,12 @@ export class StillClient {
     const r = this.requests.get(m.id);
     this.requests.delete(m.id);
     if (!r) return;
-    if (m.ok) r.resolve(m.value); else r.reject(new Error(m.error));
+    if (m.ok) r.resolve(m.value);
+    else {
+      const error = new Error(m.error);
+      if (m.stack) error.stack = m.stack;
+      r.reject(error);
+    }
   }
 
   /** Upload decoded pixels: copied to the worker (the decode cache keeps its own), or with

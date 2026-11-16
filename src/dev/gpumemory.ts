@@ -19,7 +19,7 @@ function install(): Reader {
   const state = (gl: WebGL2RenderingContext) => { let s = contexts.get(gl); if (!s) { s = { unit: 0, bindings: new Map() }; contexts.set(gl, s); } return s; };
   const proto = WebGL2RenderingContext.prototype as any;
   const wrap = (name: string, f: (gl: WebGL2RenderingContext, a: any[]) => void) => { const original = proto[name]; proto[name] = function (...args: any[]) { const result = original.apply(this, args); f(this, args); return result; }; };
-  const bpp = (f: number) => ({ 0x881A: 8, 0x8814: 16, 0x8058: 4, 0x1908: 4, 0x8229: 1, 0x822D: 2, 0x822E: 4, 0x8C3A: 4, 0x881B: 6, 0x8815: 12 } as Record<number, number>)[f] ?? 4;
+  const bpp = (f: number) => ({ 0x881A: 8, 0x8814: 16, 0x8058: 4, 0x1908: 4, 0x8229: 1, 0x822D: 2, 0x822E: 4, 0x8230: 8, 0x822F: 4, 0x8C3A: 4, 0x881B: 6, 0x8815: 12 } as Record<number, number>)[f] ?? 4;
   const bound = (gl: WebGL2RenderingContext, target: number) => { const st = state(gl); return st.bindings.get(st.unit * 0x10000 + target); };
   const level = (gl: WebGL2RenderingContext, target: number, i: number, w: number, h: number, d: number, b: number) => {
     const tex = bound(gl, target); if (!tex) return;
