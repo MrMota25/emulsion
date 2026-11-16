@@ -1,9 +1,83 @@
 # GFX100RF handoff — 2026-11-16
 
+## Merge authorization — 2026-11-16
+
+Oli authorized merging this work into main, including the latest handoff notes.
+The earlier stop/no-merge/uncommitted statements below preserve the previous
+handoff state and are superseded for this merge. The source checkpoint remains
+`aa9817d` (after core `0636871`); only handoff documentation changed afterward.
+Interactive GFX performance, issues #30/#31, and heavy masked WK memory limits
+remain follow-up work. Leave the current dev app running while Oli tests.
+
+
 User resumed on 2026-11-16 to improve GFX handling and fix the Texture regression,
 then authorized committing and pushing this checkpoint. The combined branch is
 `fix/gfx-large-images`; no PR or merge was requested. Oli also requested a dev app
 from this branch to assess GFX browsing/zoom/control performance.
+
+## Resume here: interactive GFX performance and tool conflicts
+
+**Oli requested this handoff after testing the dev app. Stop after saving it.**
+The code checkpoint is committed and pushed as **aa9817d** on
+`origin/fix/gfx-large-images`, directly after core **0636871**. No PR or merge.
+The code worktree was clean before this handoff-only documentation update.
+This update is uncommitted; the pushed source is exactly what Oli tested.
+
+Oli's observations (2026-11-16):
+
+- Initial loading of a GFX photo is slow.
+- Loading full resolution after zooming is slow.
+- Clone works extremely slowly. Filed [#31](https://github.com/mowerol/emulsion/issues/31).
+  No measured Clone timings or exact slow sub-interaction yet.
+- Being in Remove, then choosing a mask's Select Object, leaves Remove active
+  and blocks mask object selection. Filed [#30](https://github.com/mowerol/emulsion/issues/30).
+  Agent reproduction/diagnosis still pending.
+- Lightroom feels fast with these GFX files. Do not assume the size makes the
+  current delays acceptable. The shipped checkpoint was tested for export
+  correctness/reliability; it does not establish improved Develop interaction.
+
+Oli also reported Heal closing the app, asking whether the agent was doing
+something. The agent had restarted dev once to repair font loading: old session's
+last breadcrumb is **09:24:08**, current native process started **09:24:13 EST**.
+The closure lines up with that restart. No Heal panic, new macOS crash report, or
+WebKit memory termination was found for that interval. Do not record it as a
+confirmed Heal crash. A repeat without an agent restart needs its own diagnosis.
+
+Current dev app (leave running while Oli tests):
+
+- Worktree `/Users/oli/Dev/emulsion-gfx-export`, branch `fix/gfx-large-images`.
+- Started with `CARGO_TARGET_DIR=/Users/oli/Dev/emulsion/src-tauri/target npm run tauri dev`.
+- App PID **43872** at handoff; Tauri runner exec session **61668**. Recheck PIDs
+  before any action. **Do not restart/kill it during Oli's testing without telling him.**
+- Vite `http://localhost:1420/`; interface build `0.1.8+aa9817da70a5`.
+- Log `.scratch/issue-27/dev-app.log`; persistent log
+  `~/Library/Logs/app.emulsion.desktop/Emulsion.log`.
+- `node_modules` is now an independent APFS clone. Its former symlink to the main
+  checkout made Vite reject Geist font URLs. Current font request returns HTTP 200.
+- The old-session breadcrumb dump records `load_image` **8813 ms** and startup
+  `catalog_load` **5260 ms**. These are observed IPC timings, not a decomposition
+  of decode, upload, rendering, or end-to-end time to sharp detail.
+- `.scratch/trace.log` does not currently exist in this worktree. The native log's
+  old-session breadcrumbs supplied the timings above; do not invent Clone timings.
+
+Next work, when resumed:
+
+1. Build a repeatable initial-open / zoom-to-finished-detail loop on GFX. Reuse
+   `tools/perf/inapp.mjs` and `src/dev/perfrun.ts` (`zoomdetail` exists), with an
+   isolated profiling app if automation would disturb the live dev app. Keep
+   source/capture/decode preparation and the first GPU-complete sharp frame in the
+   measurement; a source swap alone is insufficient. Exact paths/recipes for the
+   two files Oli was testing have not been recorded.
+2. Separate native decode, IPC/packing, upload and GPU preparation/render delays.
+   Preserve full-quality settled output and do not silently bypass denoise.
+3. Reproduce and minimise Clone's latency (#31), and the tool-state conflict (#30).
+   Keep their causes separate until evidence shows otherwise.
+4. Heavy masked exports still have the WK memory-limit blocker documented below.
+   Interactive performance is additional work, not proof that export tiling failed.
+
+No code or performance instrumentation was changed after the pushed checkpoint;
+only this handoff was updated and issues #30/#31 were filed. The live app was
+left running. No additional commits/pushes were made for this documentation note.
 
 ## Checkpoint and worktrees
 
