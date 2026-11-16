@@ -83,6 +83,9 @@ export function Library() {
   const vp = useViewport(scrollRef, 'y', [s.choosingImport, !!shown.length, loupe]);
   const [layout, setLayout] = useState({ cols: 1, pitch: size + 80, gap: 12 });
   const measured = useRef(layout);
+  // Measure for a grid geometry, not for every scroll window. Adjacent rows can be
+  // a pixel apart: using the newly mounted row to choose the next window can
+  // alternate between two rows forever.
   useLayoutEffect(() => {
     const el = gridRef.current;
     if (!el) return;
@@ -94,7 +97,7 @@ export function Library() {
     gridColumns = cols;
     measured.current = { cols, pitch, gap };
     if (cols !== layout.cols || pitch !== layout.pitch || gap !== layout.gap) setLayout({ cols, pitch, gap });
-  });
+  }, [size, vp.cross, showExif, loupe, s.choosingImport, !!opening, !!shown.length]);
   const rows = Math.ceil(shown.length / layout.cols);
   const win = rowWindow(rows, layout.pitch, Math.max(0, vp.pos - GRID_PAD), vp.size || 800, vp.size || 800);
   const visible = shown.slice(win.start * layout.cols, win.end * layout.cols);
