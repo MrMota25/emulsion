@@ -295,6 +295,23 @@ impl Info {
 mod tests {
     use super::*;
 
+    /// Real capture metadata for the browser export regression; no app/catalog required.
+    #[test]
+    #[ignore = "set EMULSION_CAPTURE_DUMP to width<TAB>height<TAB>RAW<TAB>output"]
+    fn dump_engine_capture_payload() {
+        let spec = std::env::var("EMULSION_CAPTURE_DUMP").unwrap();
+        let p: Vec<_> = spec.split('\t').collect();
+        let (w, h): (usize, usize) = (p[0].parse().unwrap(), p[1].parse().unwrap());
+        let info = Info::read(Path::new(p[2])).unwrap();
+        let matrix = crate::raw::working_to_camera(Path::new(p[2])).unwrap();
+        let mut out = Vec::with_capacity(48 + w * h);
+        out.extend(info.radius.to_le_bytes());
+        out.extend((w as u32).to_le_bytes()); out.extend((h as u32).to_le_bytes());
+        for v in matrix.iter().flatten() { out.extend(v.to_le_bytes()); }
+        out.extend(info.mask_at(w, h));
+        std::fs::write(p[3], out).unwrap();
+    }
+
     fn bayer(w: usize, h: usize, f: impl Fn(usize, usize) -> f32) -> Mosaic {
         let mut data = vec![0f32; w * h];
         for r in 0..h {

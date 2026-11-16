@@ -72,12 +72,17 @@ void main() {
   vec2 uv = vec2(dot(uGeoU, f), dot(uGeoV, f)) / denominator;
   vec2 whole = vec2(textureSize(uSrc, 0)) / uRoi.zw;
   vec2 edge = 0.5 / whole;
-  if (any(lessThan(uv, -edge)) || any(greaterThan(uv, 1.0 + edge))) {
+  bool outside = any(lessThan(uv, -edge)) || any(greaterThan(uv, 1.0 + edge));
+  uv = clamp(uv, 0.0, 1.0);
+  vec2 ruv = (uv - uRoi.xy) / uRoi.zw;
+  // Sample before the varying bounds return: implicit mip derivatives need the whole quad,
+  // including helper fragments just beyond an odd-sized tile's image border. Sampling after
+  // that return can select arbitrary mip levels for the last column (and corrupt Texture).
+  vec4 source = texture(uSrc, ruv);
+  if (outside) {
     outColor = vec4(uOutside, 1.0);
     return;
   }
-  uv = clamp(uv, 0.0, 1.0);
-  vec2 ruv = (uv - uRoi.xy) / uRoi.zw;
   if (uTap > 10.5 && uTap < 11.5) {
     vec3 print = stageClarity(texelFetch(uSrc, ivec2(gl_FragCoord.xy), 0).rgb, ruv);
     outColor = vec4(clarityLightness(print), 0.0, 0.0, 1.0);
@@ -87,7 +92,7 @@ void main() {
     outColor = vec4(vec3(usmMask(ruv)), 1.0);
     return;
   }
-  vec3 x = stageInput(texture(uSrc, ruv));
+  vec3 x = stageInput(source);
   if (uCompare > 0.5 || vUv.x < uSplit) {
     outColor = vec4(stageOutput(stageToneNeutral(x)), 1.0);
     return;
@@ -112,7 +117,7 @@ void main() {
     return;
   }
   if (uTap > 11.5 && uTap < 12.5) {
-    outColor = vec4(clarityLogInput(x, uTextureOn > 0.5 ? texture(uTextureTex, ruv).r : 0.0), 0.0, 0.0, 1.0);
+    outColor = vec4(clarityLogInput(x, uTextureOn > 0.5 ? textureDeltaAt(ruv) : 0.0), 0.0, 0.0, 1.0);
     return;
   }
   x = stageExposure(x);
@@ -134,14 +139,14 @@ void main() {
     return;
   }
   if (uTap > 12.5 && uTap < 13.5) {
-    float du = uTextureOn > 0.5 ? texture(uTextureTex, ruv).r : 0.0;
+    float du = uTextureOn > 0.5 ? textureDeltaAt(ruv) : 0.0;
     float acc = uClarityOn > 0.5 ? texture(uClarityTex, ruv).r : 0.0;
     outColor = vec4(clamp(clarityLogInput(preExposure, du) + acc, LL_LOG_RANGE.x, LL_LOG_RANGE.y), gMaskFinal[int(uTapMask + 0.5)], 0.0, 1.0);
     return;
   }
   if (uTextureLog > 0.5 && uTap > 6.5 && uTap < 7.5) {
     // A masked instance's input in log lightness: before Exposure, plus the instances before it.
-    float acc = uTextureOn > 0.5 ? texture(uTextureTex, ruv).r : 0.0;
+    float acc = uTextureOn > 0.5 ? textureDeltaAt(ruv) : 0.0;
     outColor = vec4(logLightness(preExposure) + acc, gMaskFinal[int(uTapMask + 0.5)], 0.0, 1.0);
     return;
   }

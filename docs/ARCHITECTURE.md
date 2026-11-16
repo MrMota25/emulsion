@@ -160,6 +160,30 @@ The full-resolution capture cache admits sources whose base RGBA16F payload is a
 
 Halation and Glow are darktable's spektrafilm optics (film-base reflections; the Black Pro-Mist diffusion filter), applied to scene light after the tone equalizer (`stageOpticsScene`), before detail, grading and the look. `OpticsGpu` (`engine/opticsgpu.ts`, one per chain) makes the blurred fields at most 2048 px on the long edge: the extract pass with `uOpticsSource` writes the exposed scene light (scanner sharpness, haze removal, exposure, tone equalizer and their masks), each component is a separable Gaussian on the pyramid level where its sigma is at least 3 texels, and the components accumulate with upstream's per-channel weights. Sigmas are physical (a 36 mm frame across the long edge, times Size), so the halo keeps its relative size at every render size; a region takes the preview's fields. The fields are cached by the source and everything before them (`OPTICS_INPUT`), Glow's by its size and Halation's by its size and Glow's mix (it blurs the diffused light), so an Amount drag only re-mixes. Measured in headless Chrome at 2048 × 1365: both fields 1.6 ms, Halation 0.6, Glow 1.1 (`tools/browser-tests/optics.ts`, which also compares with the upstream C). A mask's Glow is darktable's masked second instance of the diffusion (`OpticsGpu.renderMasked`): each instance blurs its own input, which the extract pass writes with `uOpticsSource` 2 (the photo's optics and the earlier masks' Glow applied, `uMaskGlowUpTo`), into its own layer of a texture array that the develop pass reads on unit 13 (`MASK_GLOW_UNIT`; a layer per instance, `uMaskGlow` [fraction, layer, size]). The field is made over the whole photo and the result blended by the mask, so light from outside the mask glows into it and the halo stops at its edge. A layer is kept while its input and size are, so a mask's own Glow amount only re-mixes, while the photo's optics or an earlier mask's Glow remake it (1.6 ms per field at 2048 px). The masks' Glow uniforms key the maps after the optics (`OPTICS_STAGE`), not the masks' refinement or the optics' own input. A region takes the preview's array. Checked by `tools/browser-tests/optics.ts` (the stage against `maskedDiffusionMix`, caching, and a mask over everything equal to the photo's Glow and a mask over part of the frame equal to it inside and to the plain photo outside, both 0/255) and `region-detail` (`maskedGlow`). Edits saved with the original effects active (`halationVersion`/`glowVersion` absent) still use the original renderer: a thresholded highlight extract blurred on small fixed levels of a downsample pyramid (`engine/pyramid.ts`) and added after the tone curve (`stageOptics`). Passes are skipped when their amounts are zero.
 
+### Large local-filter maps
+
+Above eight million source pixels, Colour, Sharpening, Texture and Dehaze run the same filter passes
+on padded 1024 px cores (`engine/spatialtiles.ts`). Colour uses darktable's 20 px
+support per sequential instance; Sharpening grows by its blur and contrast-mask
+support. Texture retains every wavelet band, with their combined support for each
+sequential instance. Dehaze keeps full-source ambient measurements and tiles each
+instance separately. Only the valid cores are copied into full-density output maps. Colour
+stores RGB32F as RG32F plus R32F (blue on texture unit 14), so it retains 32-bit
+precision without allocating a full-source RGBA32F resource; Dehaze stores its
+four affine coefficients in two RG32F planes. Scratch is released
+after preparation; lane invalidation, source-size cleanup and disposal own the
+finished maps. This does not replace global analysis with preview approximations.
+16-bit export renders and reads its final float target in strips of at most
+48 MiB, with each strip's view retaining the whole export's crop, effect scale,
+and seed. Its corrected early-stage source is shared across strips, so releasing
+earlier denoise/capture buffers does not repeat that work. The still renderer retains
+the Remove context until every 16-bit strip has rendered. Per-frame export failures
+report their original worker stack to the log.
+
+The develop pass samples its source before the varying off-image return. Implicit
+mipmap derivatives need the helper fragments outside the photo too; otherwise an
+odd-sized padded Texture tile can read a wrong mip level along the image border.
+
 ### Crop and straighten
 
 A recipe's `crop` (`film/crop.ts`) turns the photo about its centre by `angle`, then cuts a rectangle from it, measured in units of the source's width and height (so with no rotation it is the ordinary crop in image coordinates). The develop pass composes crop with perspective and maps each frame pixel to the source with one projective map (`uGeoU`, `uGeoV`, `uGeoW`); every other pass (tone equalizer map, highlight pyramid, sharpening) still works on the whole source, which the develop pass samples at the mapped point. Grain, halation and glow belong to the film, so they stay tied to the uncropped frame and cropping enlarges them, as it would a negative. The vignette is RawTherapee's post-crop one: it is fitted to the crop (`uVigGeoU/V/W`, the inverse of the frame map, so source-space taps place it too). While cropping, the canvas shows the whole straightened photo (`bounds`) with the stage colour around it, and `CropOverlay` edits a draft in the store that is saved as one undo step when cropping ends. Everything that sizes a render (export, thumbnails, stock tiles, histogram) uses `framePixels`. Pasted settings keep each frame's own crop.
@@ -270,7 +294,8 @@ client sends them to the worker's copies of the stores (`provideLut`, `adoptUser
 RAW noise reduction runs locally through RawNIND/ONNX Runtime on demand, before
 capture sharpening and lens correction. `noise_cache.rs` serializes inference,
 retains one full-resolution source/result pair in memory and bounds its disk cache
-to 2 GiB. Identity includes canonical source path, size, nanosecond mtime, decode
+to 4 GiB and admits sources up to 128 MP. Full-resolution payloads pack borrowed
+RGB32F planes directly into their final RGBA16F buffer, avoiding float-plane clones. Identity includes canonical source path, size, nanosecond mtime, decode
 version/baseline and pinned model hash; amount and virtual-copy identity do not
 rerun inference. CoreML falls back to CPU on initialization or inference failure.
 The runtime session is explicitly released on application exit.

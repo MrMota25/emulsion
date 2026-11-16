@@ -16,6 +16,7 @@ import { ensureCapture } from './thumbs';
 import { stillEngine, StillsLost, type StillClient } from './stillclient';
 import type { RemoveContext } from '../engine/removequeue';
 import { prepareRemovals } from './removal';
+import { reportError } from '../backend/trail';
 
 export interface ExportOptions {
   /** The folder every frame goes to, or null for each photo's own folder. */
@@ -145,10 +146,14 @@ export async function exportPhotos(
   const develop = async (p: Photo): Promise<[Uint8Array | Uint16Array, number, number] | null> => {
     const [w, h, img] = await decodeFor(p, opts.longEdge, maxTexture);
     const [iw, ih] = [img.width, img.height];
-    // Moved to the worker, not copied: nothing here keeps the decode.
-    const src = engine.upload(img, p.path, true);
     // An unedited photo exports as it develops: a RAW with Emulsion Standard, a JPEG as Neutral.
     const recipe = p.recipe ?? uneditedRecipe(p);
+    // At full AI strength export uses only the result: avoid retaining a second 102 MP GPU
+    // source solely for Before/Split, which are not part of an export. Metadata stays intact.
+    const input = img.denoised && noiseEnabled(recipe) && recipe.noiseReduction!.amount === 100
+      ? { ...img, data: img.denoised, denoised: undefined } : img;
+    // Moved to the worker, not copied: nothing here keeps the decode.
+    const src = engine.upload(input, p.path, true);
     // Everything after the upload is guarded, so a failed capture or profile still frees the source and its targets.
     try {
       if (recipe.captureSharpening > 0) await ensureCapture(engine, src, p.path);
@@ -195,6 +200,7 @@ export async function exportPhotos(
       else result.written.push(written.path);
     } catch (err) {
       if (signal.canceled) { result.canceled = true; break; }
+      reportError('Photo export', err);
       result.failed.push({ name: photoName(p), error: errorText(err) });
       if (err instanceof ExportWriteError && err.stop) { result.stopped = errorText(err); break; }
     }

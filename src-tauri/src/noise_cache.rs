@@ -8,7 +8,7 @@ use crate::{
     denoise::{Denoiser, MODEL_SHA256, Provider},
     raw,
 };
-use image::{DynamicImage, Rgb32FImage};
+use image::Rgb32FImage;
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
@@ -19,8 +19,9 @@ use std::{
 };
 use tauri::{Emitter, Manager};
 
-const DISK_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
-const MAX_PIXELS: u64 = 100_000_000;
+// Includes the 102 MP GFX sensor and a full float source/result pair (~2.45 GB).
+const DISK_LIMIT: u64 = 4 * 1024 * 1024 * 1024;
+const MAX_PIXELS: u64 = 128_000_000;
 static WORKER: Mutex<Worker> = Mutex::new(Worker {
     model: None,
     pair: None,
@@ -337,7 +338,7 @@ fn load_cached(
                 let raw = raw::decode(path, false)?;
                 if raw.image.width() as u64 * raw.image.height() as u64 > MAX_PIXELS {
                     return Err(
-                        "This RAW is too large for AI noise reduction (100 MP limit).".into(),
+                        "This RAW is too large for AI noise reduction (128 MP limit).".into(),
                     );
                 }
                 let original = raw.image.into_rgb32f();
@@ -395,39 +396,25 @@ fn load_cached(
     let pair = worker.pair.as_ref().unwrap().1.clone();
     let m = &pair.meta;
     let (w, h) = decode::fit(m.width, m.height, edge);
-    let resize = |image: &Rgb32FImage| {
-        if (w, h) == image.dimensions() {
-            DynamicImage::ImageRgb32F(image.clone())
-        } else {
-            DynamicImage::ImageRgb32F(image::imageops::resize(
-                image,
-                w,
-                h,
-                image::imageops::FilterType::Triangle,
-            ))
-        }
-    };
-    let original = resize(&pair.original);
-    let raw = raw::Decoded {
-        image: original,
-        white: m.white,
-        full_size: m.full_size,
-        frame: raw::camera_frame(path),
-        camera_to_working: m.camera.camera_to_working,
-        camera: raw::CameraMetadata {
+    let camera = raw::CameraMetadata {
             // Entries written before noise profiles were sent lack one; read the ISO again.
             noise: m.camera.noise.clone().or_else(|| raw::noise_profile(path)),
             colour: m.camera.colour.clone().or_else(|| raw::colour_source_of(path)),
             ..m.camera.clone()
-        },
     };
-    let mut bytes = decode::raw_for_engine(path, raw, None)?;
+    let mut bytes = decode::raw_header(path, (w, h), m.white, m.full_size, &camera, raw::camera_frame(path))?;
     let flags = u32::from_le_bytes(bytes[12..16].try_into().unwrap()) | 8;
     bytes[12..16].copy_from_slice(&flags.to_le_bytes());
-    let output = resize(&pair.denoised).into_rgb32f();
-    for p in output.pixels() {
-        for v in [p[0], p[1], p[2], 1.0] {
-            bytes.extend_from_slice(&half::f16::from_f32(v).to_le_bytes());
+    bytes.try_reserve_exact(w as usize * h as usize * 16).map_err(|e| format!("Could not allocate noise reduction pixels: {e}"))?;
+    // Pack the two borrowed full-size planes directly into the final payload. Previously
+    // this cloned RGB, converted it to RGBA32F, made another byte plane, and grew the Vec
+    // again for the denoised half: several gigabytes of avoidable peak memory on GFX files.
+    for image in [&pair.original, &pair.denoised] {
+        if image.dimensions() == (w, h) {
+            decode::append_raw_pixels(&mut bytes, image);
+        } else {
+            let resized = image::imageops::resize(image, w, h, image::imageops::FilterType::Triangle);
+            decode::append_raw_pixels(&mut bytes, &resized);
         }
     }
     notify(1, 1);
@@ -450,7 +437,8 @@ mod tests {
         let _cleanup = Cleanup;
         let path = std::env::var("EMULSION_NOISE_RAW").unwrap();
         let root = tempfile::tempdir().unwrap();
-        let assets = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/denoise/assets");
+        let assets = std::env::var_os("EMULSION_DENOISE_ASSETS").map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/denoise/assets"));
         let first = load_cached(
             root.path(),
             Path::new(&path),
@@ -460,6 +448,10 @@ mod tests {
         )
         .unwrap();
         assert_ne!(u32::from_le_bytes(first[12..16].try_into().unwrap()) & 8, 0);
+        if let Some(output) = std::env::var_os("EMULSION_NOISE_FULL_DUMP") {
+            let full = load_cached(root.path(), Path::new(&path), None, || unreachable!(), |_, _| {}).unwrap();
+            std::fs::write(output, full).unwrap();
+        }
         shutdown();
         let second = load_cached(
             root.path(),

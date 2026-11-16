@@ -13,6 +13,8 @@
 // This engine approximation ends at the settle; the equalizer's port above is unchanged.
 uniform float uCeOn;
 uniform sampler2D uCeTex;
+uniform sampler2D uCeBlue;
+uniform float uCeSplit;
 uniform vec4 uCeRoi;
 
 /** STEP 1 of process(): darktable UCS U and V, lightness L* and RGB saturation. */
@@ -28,5 +30,7 @@ vec4 ceAnalyse(vec3 rgb) {
 vec3 stageColorEqual(vec3 rgb, vec2 uv) {
   if (uCeOn < 0.5) return rgb;
   if (uCeOn > 1.5) return rgb + texture(uCeTex, uCeRoi.xy + uv * uCeRoi.zw).rgb;
-  return texture(uCeTex, uv).rgb;
+  vec3 color = texture(uCeTex, uv).rgb;
+  if (uCeSplit > 0.5) color.b = texture(uCeBlue, uv).r;
+  return color;
 }

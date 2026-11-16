@@ -4,11 +4,13 @@
 // removal right after lens correction, before exposure). Drawn at the source's size for the
 // filter passes (dehazegf.frag.glsl), and at a small size, read back, for the ambient light.
 uniform sampler2D uSrc;
+uniform highp vec4 uInputRect;
 
 #include "common.glsl"
 #include "stages/tone.glsl"
 #include "stages/input.glsl"
 
 void main() {
-  outColor = vec4(stageInput(texture(uSrc, vUv)), 1.0);
+  vec2 uv = uInputRect.z > 0.0 ? uInputRect.xy + vUv * uInputRect.zw : vUv;
+  outColor = vec4(stageInput(texture(uSrc, uv)), 1.0);
 }

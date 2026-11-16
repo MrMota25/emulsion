@@ -40,7 +40,7 @@ export type FromStills =
   /** The GPU context was lost: every source and pending render is gone, so the client starts a new engine. */
   | { type: 'lost' }
   | { type: 'reply'; id: number; ok: true; value: Uint8Array | Uint16Array | Blob | RemoveInput | null }
-  | { type: 'reply'; id: number; ok: false; error: string };
+  | { type: 'reply'; id: number; ok: false; error: string; stack?: string };
 
 export class StillRenderer {
   readonly engine: Engine;
@@ -73,7 +73,7 @@ export class StillRenderer {
   /** Reply with an error, telling the client first when it came from a lost GPU context. */
   private fail(id: number, err: unknown) {
     if (this.engine.gpu?.gl.isContextLost?.()) this.markLost();
-    this.post({ type: 'reply', id, ok: false, error: String(err) });
+    this.post({ type: 'reply', id, ok: false, error: String(err), stack: err instanceof Error ? err.stack : undefined });
   }
 
   handle(m: ToStills) {
@@ -144,16 +144,15 @@ export class StillRenderer {
     try {
       const src = this.source(m.key);
       const eng = this.engine, previous = eng.removeContext;
-      // The draw is submitted before the readback first yields, so the context is only needed
-      // until then (and nothing else uses this engine meanwhile).
+      // An 8-bit draw is submitted before readback yields. A 16-bit export submits more
+      // strips after each await, so it owns the removal context until all strips are drawn.
       let reading: Promise<Uint8Array<ArrayBuffer>>;
       eng.removeContext = m.removal;
       if (m.bits === 16) {
-        let deep: Promise<Uint16Array<ArrayBuffer>>;
-        try { deep = eng.readPixels16Async(src, m.recipe, m.w, m.h, m.seed); }
-        finally { eng.removeContext = previous; }
-        const px = await deep;
-        this.post({ type: 'reply', id: m.id, ok: true, value: px }, [px.buffer]);
+        try {
+          const px = await eng.readPixels16Async(src, m.recipe, m.w, m.h, m.seed);
+          this.post({ type: 'reply', id: m.id, ok: true, value: px }, [px.buffer]);
+        } finally { eng.removeContext = previous; }
         return;
       }
       try { reading = eng.readPixelsAsync(src, m.recipe, m.w, m.h, m.seed); }

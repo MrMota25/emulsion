@@ -30,7 +30,7 @@ open /tmp/denoise-cpu/comparison.html
 
 Use `--provider coreml` and a different output directory for CoreML. Both modes use the same model and four CPU threads; a session is reused across tiles and repeats. CoreML requests MLProgram, static shapes and all compute units. ONNX Runtime may still execute unsupported graph regions on CPU. A successful CoreML run is not proof that the whole graph ran on the Neural Engine. The probe fails on provider registration/inference errors instead of silently changing providers; rerun with `cpu` to compare explicitly.
 
-Omit `--crop` to measure a full frame. `--repeat 2` is the default: the first pass includes first-inference costs, the second reuses the session. CoreML's disk compilation cache also survives separate runs. `--strength 0.5` blends half the original with half the denoised result. The app uses the same full-strength result, caching full-resolution original/result float buffers (one pair in memory, at most 2 GiB on disk). The CLI creates separate artifacts instead.
+Omit `--crop` to measure a full frame. `--repeat 2` is the default: the first pass includes first-inference costs, the second reuses the session. CoreML's disk compilation cache also survives separate runs. `--strength 0.5` blends half the original with half the denoised result. The app uses the same full-strength result, caching full-resolution original/result float buffers (one pair in memory, up to 128 MP and at most 4 GiB on disk). The CLI creates separate artifacts instead.
 
 Inspect exposure metadata cheaply to select useful ISO samples:
 

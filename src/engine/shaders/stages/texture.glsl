@@ -19,6 +19,13 @@
 uniform float uTexturePreview;
 uniform float uTextureOn;
 uniform sampler2D uTextureTex;
+// A temporary masked instance's accumulated map may cover only a padded tile.
+uniform vec4 uTextureTile;
+float textureDeltaAt(vec2 uv) {
+  vec2 p = previewMapUv(uv, uTexturePreview);
+  if (uTextureTile.z > 0.0) p = (p - uTextureTile.xy) / uTextureTile.zw;
+  return texture(uTextureTex, p).r;
+}
 // 1 (Engine.detailOrder 'log'): the change is in log lightness, taken before Exposure
 // (detaillog.glsl), and applied as a ratio of luminance.
 uniform float uTextureLog;
@@ -35,6 +42,6 @@ vec3 stageClarityLog(vec3 x, vec2 uv) {
 
 vec3 stageTexture(vec3 x, vec2 uv) {
   if (uTextureOn < 0.5) return x;
-  float d = texture(uTextureTex, previewMapUv(uv, uTexturePreview)).r;
+  float d = textureDeltaAt(uv);
   return labShiftL(x, uTextureLog > 0.5 ? logShift(x, d) : d);
 }

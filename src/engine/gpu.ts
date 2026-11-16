@@ -16,6 +16,10 @@ export interface Target {
   w: number;
   h: number;
   hdr: boolean;
+  /** Blue channel of a split full-resolution RGB32F map. */
+  blue?: Target;
+  /** Source-pixel rectangle a padded scratch tile's input tap samples. */
+  area?: { x: number; y: number; w: number; h: number; fullW: number; fullH: number };
 }
 
 export class Program {
@@ -240,12 +244,15 @@ export class Gpu {
     const fbo = gl.createFramebuffer()!;
     gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-    const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+    const status = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    const ok = status === gl.FRAMEBUFFER_COMPLETE;
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     if (!ok) {
       gl.deleteTexture(tex);
       gl.deleteFramebuffer(fbo);
-      throw new GpuError(`Could not create a ${w}x${h} render target`);
+      const error = gl.getError();
+      const format = hdr ? `${single === 'rg' ? 'RG' : single ? 'R' : 'RGBA'}${precise ? '32' : '16'}F` : 'RGBA8';
+      throw new GpuError(`Could not create a ${w}x${h} render target (${format}; framebuffer 0x${status.toString(16)}; GL 0x${error.toString(16)})`);
     }
     return { tex, fbo, w, h, hdr };
   }
@@ -291,6 +298,7 @@ export class Gpu {
   }
 
   free(t: Target) {
+    if (t.blue) this.free(t.blue);
     this.gl.deleteTexture(t.tex);
     this.gl.deleteFramebuffer(t.fbo);
   }

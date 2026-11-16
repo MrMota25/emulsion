@@ -46,6 +46,9 @@ uniform float uTmin;
 uniform float uPrevOn;
 uniform float uWeighted;
 uniform float uGfScale;
+uniform sampler2D uPrevTail;
+uniform float uPrevSplit;
+uniform vec4 uPrevRect;
 
 const int MAX_W = 12;
 const float FLT_MAX = 3.402823466e38;
@@ -62,7 +65,12 @@ void main() {
   outColor2 = vec4(0.0);
   outColor3 = vec4(0.0);
   if (uMode >= 7) {
-    vec4 prev = uPrevOn > 0.5 ? (uMode == 9 ? texture(uA, vUv) : texelFetch(uA, p, 0)) : vec4(0.0, 0.0, 0.0, 1.0);
+    vec4 prev = vec4(0.0, 0.0, 0.0, 1.0);
+    if (uPrevOn > 0.5) {
+      vec2 uv = uPrevRect.z > 0.0 ? uPrevRect.xy + vUv * uPrevRect.zw : vUv;
+      prev = uMode == 9 || uPrevSplit > 0.5 ? texture(uA, uv) : texelFetch(uA, p, 0);
+      if (uPrevSplit > 0.5) prev.ba = texture(uPrevTail, uv).rg;
+    }
     vec3 x = texelFetch(uI, p, 0).rgb;
     if (uMode != 7) {
       outColor = vec4(prev.a * x + prev.rgb, 1.0);
