@@ -212,7 +212,7 @@ export class ThumbStore {
     try {
       while (this.wanted.size && !this.pauses) {
         // A slow embedded-preview read must not hold up other ready frames,
-        // including Remove thumbnails whose camera originals are hidden.
+        // including Remove thumbnails still showing their camera originals.
         // original() resumes the queue when the missing bytes arrive.
         const next = [...this.wanted.entries()].find(([id, job]) => !this.settling.has(id) && this.originals.has(job.path));
         if (!next) break;
@@ -249,7 +249,8 @@ export class ThumbStore {
       const d = this.developed.get(id);
       if (d && (!hasRemove(recipe) || d.key === thumbKey(recipe, white, sourceVersion, framing))) return d.url;
     }
-    return hasRemove(recipe) ? undefined : this.originals.get(path)?.url;
+    // Reuse the camera preview while edits or saved Remove patches are unavailable.
+    return this.originals.get(path)?.url;
   }
 
   /** A completed foreground removal can unblock library/filmstrip thumbnails. */

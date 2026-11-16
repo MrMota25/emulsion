@@ -25,9 +25,31 @@ beforeEach(() => {
 });
 afterEach(() => { thumbs.clear(); });
 
-it('does not show an original thumbnail while the saved removal is restoring', async () => {
-  await thumbs.original('/saved.raf');
-  expect(thumbs.url('/saved.raf', recipe)).toBeUndefined();
+it('shows the cached original while the saved removal is restoring', async () => {
+  const original = await thumbs.original('/saved.raf');
+  thumbs.want('/saved.raf', recipe, 1, null, true);
+  await vi.waitFor(() => expect(mocks.cached).toHaveBeenCalledOnce());
+  try {
+    expect(thumbs.url('/saved.raf', recipe)).toBe(original.url);
+    expect(mocks.render).not.toHaveBeenCalled();
+    expect(mocks.thumbnail).toHaveBeenCalledOnce();
+  } finally {
+    release(new Uint8Array(512 * 512 * 4));
+    await vi.waitFor(() => expect(mocks.render).toHaveBeenCalledOnce());
+  }
+  expect(thumbs.url('/saved.raf', recipe)).toBeDefined();
+  expect(thumbs.url('/saved.raf', recipe)).not.toBe(original.url);
+  expect(mocks.thumbnail).toHaveBeenCalledOnce();
+});
+
+it('keeps the original visible when the saved removal patch is missing', async () => {
+  mocks.cached.mockResolvedValue(null);
+  const original = await thumbs.original('/missing.raf');
+  thumbs.want('/missing.raf', recipe, 1, null, true);
+  await vi.waitFor(() => expect(mocks.cached).toHaveBeenCalledOnce());
+  expect(thumbs.url('/missing.raf', recipe)).toBe(original.url);
+  expect(mocks.render).not.toHaveBeenCalled();
+  expect(mocks.thumbnail).toHaveBeenCalledOnce();
 });
 
 it('restores a ready Remove thumbnail while an earlier photo waits for its embedded preview', async () => {
@@ -39,7 +61,7 @@ it('restores a ready Remove thumbnail while an earlier photo waits for its embed
   thumbs.want('/slow.raf', defaultRecipe(), 1, null, true);
   thumbs.want('/saved.raf', recipe, 1, null, true);
   try {
-    await vi.waitFor(() => expect(thumbs.url('/saved.raf', recipe)).toBeDefined(), { timeout: 300 });
+    await vi.waitFor(() => expect(mocks.render).toHaveBeenCalledOnce(), { timeout: 300 });
   } finally {
     finish(new Blob(['original']));
     await vi.waitFor(() => expect(mocks.render).toHaveBeenCalledTimes(2));
@@ -60,18 +82,19 @@ it('updates an existing thumbnail when a new Remove completes', async () => {
   const pixels = new Uint8Array(512 * 512 * 4);
   mocks.cached.mockResolvedValue(pixels);
   thumbs.want('/saved.raf', recipe, 1, null, true);
-  await vi.waitFor(() => expect(thumbs.url('/saved.raf', recipe)).toBeDefined());
+  await vi.waitFor(() => expect(mocks.render).toHaveBeenCalledOnce());
   const oldUrl = thumbs.url('/saved.raf', recipe);
+  const original = await thumbs.original('/saved.raf');
   const changed = { ...recipe, retouch: [newCircleSpot([.7, .5], 'remove', .03, .01)] };
   mocks.cached.mockResolvedValue(null);
   thumbs.want('/saved.raf', changed, 1, null, true);
-  expect(thumbs.url('/saved.raf', changed)).toBeUndefined();
+  expect(thumbs.url('/saved.raf', changed)).toBe(original.url);
   await vi.waitFor(() => expect(mocks.cached).toHaveBeenCalledTimes(2));
   // The failed cache lookup must first have reached the waiting-for-patch path.
   await new Promise(r => setTimeout(r, 10));
   mocks.cached.mockResolvedValue(pixels);
   thumbs.removalsReady('/saved.raf');
-  await vi.waitFor(() => expect(thumbs.url('/saved.raf', changed)).toBeDefined());
+  await vi.waitFor(() => expect(mocks.render).toHaveBeenCalledTimes(2));
   expect(thumbs.url('/saved.raf', changed)).not.toBe(oldUrl);
   expect(mocks.render.mock.calls[mocks.render.mock.calls.length - 1][0].patches.has(changed.retouch[0].id)).toBe(true);
 });
@@ -82,7 +105,7 @@ it('does not miss completion while a thumbnail cache miss is still in flight', a
   mocks.cached.mockResolvedValue(new Uint8Array(512 * 512 * 4));
   thumbs.removalsReady('/saved.raf');
   release(null);
-  await vi.waitFor(() => expect(thumbs.url('/saved.raf', recipe)).toBeDefined());
+  await vi.waitFor(() => expect(mocks.render).toHaveBeenCalledOnce());
   expect(mocks.cached).toHaveBeenCalledTimes(2);
   expect(mocks.render).toHaveBeenCalledOnce();
 });
