@@ -14,9 +14,12 @@
 uniform float uDehazePreview;
 uniform float uDehazeOn;
 uniform sampler2D uDehazeTex;
+uniform sampler2D uDehazeTail;
+uniform float uDehazeSplit;
 
 vec3 stageDehaze(vec3 x, vec2 uv) {
   if (uDehazeOn < 0.5) return x;
   vec4 f = texture(uDehazeTex, previewMapUv(uv, uDehazePreview));
+  if (uDehazeSplit > 0.5) f.ba = texture(uDehazeTail, previewMapUv(uv, uDehazePreview)).rg;
   return f.a * x + f.rgb;
 }

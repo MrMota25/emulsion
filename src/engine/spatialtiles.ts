@@ -18,20 +18,21 @@ export class SpatialTiles {
     this.release(); return true;
   }
 
-  *render(w: number, h: number, reach: number, core: number, rgb: boolean,
+  *render(w: number, h: number, reach: number, core: number, channels: 'r' | 'rg' | 'rgb' | 'rgba',
     process: (tile: Tile) => Generator<void, Target>): Generator<void, Target> {
     this.release();
     const g = this.g;
     // RGB32F is not a WebGL renderable format. RG32F + R32F keeps all three 32-bit
     // channels, without a multi-gigabyte RGBA32F resource (or reduced float precision).
-    const out = g.target(w, h, true, true, 'rg');
+    const out = g.target(w, h, true, true, channels === 'r' ? true : 'rg');
     this.out = out;
     let group: Target | null = null, complete = false;
     const previousClip = g.clip;
     try {
-      if (rgb) out.blue = g.target(w, h, true, true, true);
+      if (channels === 'rgb' || channels === 'rgba') out.blue = g.target(w, h, true, true, channels === 'rgba' ? 'rg' : true);
       group = out.blue ? g.group([out, out.blue]) : out;
       for (const tile of tilesFor(w, h, reach, 0, core)) {
+        g.clip = null;
         const result = yield* process(tile);
         g.bind(0, result.tex);
         this.copy.set({ uTex: 0, uOffset: [tile.px, tile.py] });

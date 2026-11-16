@@ -162,17 +162,27 @@ Halation and Glow are darktable's spektrafilm optics (film-base reflections; the
 
 ### Large local-filter maps
 
-Above eight million source pixels, Colour and Sharpening run the same filter passes
+Above eight million source pixels, Colour, Sharpening, Texture and Dehaze run the same filter passes
 on padded 1024 px cores (`engine/spatialtiles.ts`). Colour uses darktable's 20 px
 support per sequential instance; Sharpening grows by its blur and contrast-mask
-support. Only the valid cores are copied into full-density output maps. Colour
+support. Texture retains every wavelet band, with their combined support for each
+sequential instance. Dehaze keeps full-source ambient measurements and tiles each
+instance separately. Only the valid cores are copied into full-density output maps. Colour
 stores RGB32F as RG32F plus R32F (blue on texture unit 14), so it retains 32-bit
-precision without allocating a full-source RGBA32F resource. Scratch is released
+precision without allocating a full-source RGBA32F resource; Dehaze stores its
+four affine coefficients in two RG32F planes. Scratch is released
 after preparation; lane invalidation, source-size cleanup and disposal own the
 finished maps. This does not replace global analysis with preview approximations.
 16-bit export renders and reads its final float target in strips of at most
 48 MiB, with each strip's view retaining the whole export's crop, effect scale,
-and seed. Per-frame export failures report their original worker stack to the log.
+and seed. Its corrected early-stage source is shared across strips, so releasing
+earlier denoise/capture buffers does not repeat that work. The still renderer retains
+the Remove context until every 16-bit strip has rendered. Per-frame export failures
+report their original worker stack to the log.
+
+The develop pass samples its source before the varying off-image return. Implicit
+mipmap derivatives need the helper fragments outside the photo too; otherwise an
+odd-sized padded Texture tile can read a wrong mip level along the image border.
 
 ### Crop and straighten
 

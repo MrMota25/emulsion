@@ -144,16 +144,15 @@ export class StillRenderer {
     try {
       const src = this.source(m.key);
       const eng = this.engine, previous = eng.removeContext;
-      // The draw is submitted before the readback first yields, so the context is only needed
-      // until then (and nothing else uses this engine meanwhile).
+      // An 8-bit draw is submitted before readback yields. A 16-bit export submits more
+      // strips after each await, so it owns the removal context until all strips are drawn.
       let reading: Promise<Uint8Array<ArrayBuffer>>;
       eng.removeContext = m.removal;
       if (m.bits === 16) {
-        let deep: Promise<Uint16Array<ArrayBuffer>>;
-        try { deep = eng.readPixels16Async(src, m.recipe, m.w, m.h, m.seed); }
-        finally { eng.removeContext = previous; }
-        const px = await deep;
-        this.post({ type: 'reply', id: m.id, ok: true, value: px }, [px.buffer]);
+        try {
+          const px = await eng.readPixels16Async(src, m.recipe, m.w, m.h, m.seed);
+          this.post({ type: 'reply', id: m.id, ok: true, value: px }, [px.buffer]);
+        } finally { eng.removeContext = previous; }
         return;
       }
       try { reading = eng.readPixelsAsync(src, m.recipe, m.w, m.h, m.seed); }

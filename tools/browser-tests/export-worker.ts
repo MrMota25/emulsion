@@ -13,6 +13,7 @@ import { exportPhotos } from '../../src/library/export';
 import { prepareRemovals } from '../../src/library/removal';
 import { engineMode } from '../../src/ui/developclient';
 import type { Photo } from '../../src/library/store';
+import { StillRenderer } from '../../src/engine/stills';
 
 const W = 1200, H = 800;
 const inputs: Uint8Array[] = [];
@@ -49,9 +50,9 @@ const maxDiff = (a: Uint8Array, b: Uint8Array) => { let m = 0; for (let i = 0; i
 
 async function main() {
   const recipe = { ...defaultRecipe(), captureSharpening: 0, exposure: 0.4,
-    retouch: [newCircleSpot([.5, .5], 'remove', .08, .02), newCircleSpot([.55, .52], 'remove', .06, .02)] };
+    retouch: [newCircleSpot([.5, .5], 'remove', .08, .02), newCircleSpot([.55, .92], 'remove', .06, .02)] };
   const photo: Photo = { path: '/a.jpg', rel: 'a.jpg', name: 'a.jpg', size: 1, modified: 0, recipe, seed: 3,
-    white: null, rating: 0, label: null, heart: false, raw: false, pair: null };
+    white: null, rating: 0, label: null, flag: null, raw: false, pair: null };
   const started = performance.now();
   const opts = { dir: '/exports', subfolder: '', longEdge: null, format: { kind: 'jpeg' as const, quality: 92 }, existing: 'rename' as const };
   const result = await exportPhotos([photo], opts, () => {}, { canceled: false });
@@ -103,8 +104,22 @@ async function main() {
   const tall16 = await eng.readPixels16Async(src, recipe, tw, th, photo.seed), tall8 = eng.readPixels(src, recipe, tw, th, photo.seed);
   let tallDiff = 0;
   for (let i = 0, o = 0; i < tw * th * 4; i += 4, o += 3) for (let k = 0; k < 3; k++) tallDiff = Math.max(tallDiff, Math.abs(tall16[o + k] / 257 - tall8[i + k]));
-  const ok = inputDiff <= 1 && outDiff <= 1 && centre[0] > 150 && centre[1] < 120 && deepDiff <= 2 && levels.size > 2 * levels8.size && tallDiff <= 2;
+  // Go through the still queue too: its Remove context must survive the await between strips.
+  // The lower Remove spot lies in the second strip, so losing it changes actual output pixels.
+  const queued16 = await new Promise<Uint16Array>((resolve, reject) => {
+    const renderer = new StillRenderer(document.createElement('canvas'), reply => {
+      if (reply.type === 'reply') {
+        if (!reply.ok) reject(Error(reply.error));
+        else resolve(reply.value as Uint16Array);
+      }
+    });
+    renderer.handle({ type: 'upload', key: 1, img, origin: photo.path });
+    renderer.handle({ type: 'render', id: 1, key: 1, recipe, w: tw, h: th, seed: photo.seed, removal: context, bits: 16 });
+  });
+  let queuedDiff = 0;
+  for (let i = 0; i < tall16.length; i++) queuedDiff = Math.max(queuedDiff, Math.abs(tall16[i] - queued16[i]));
+  const ok = inputDiff <= 1 && outDiff <= 1 && centre[0] > 150 && centre[1] < 120 && deepDiff <= 2 && levels.size > 2 * levels8.size && tallDiff <= 2 && queuedDiff === 0;
   document.body.dataset.result = `${ok ? 'PASS' : 'FAIL'}: mode ${engineMode()}, Remove inputs max diff ${inputDiff}, output max diff ${outDiff}, centre ${centre}, worker export ${workerMs.toFixed(0)} ms; ` +
-    `16-bit vs 8-bit max diff ${deepDiff.toFixed(2)} (8-bit steps), top-row levels ${levels.size} vs ${levels8.size}, centre ${centre16}, 16-bit export ${deepMs.toFixed(0)} ms; ${tw}x${th} in strips max diff ${tallDiff.toFixed(2)}`;
+    `16-bit vs 8-bit max diff ${deepDiff.toFixed(2)} (8-bit steps), top-row levels ${levels.size} vs ${levels8.size}, centre ${centre16}, 16-bit export ${deepMs.toFixed(0)} ms; ${tw}x${th} in strips max diff ${tallDiff.toFixed(2)}, queued strips ${queuedDiff}/65535`;
 }
 main().catch(error => { document.body.dataset.result = `FAIL: ${String(error)}`; });

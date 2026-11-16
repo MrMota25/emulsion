@@ -18,7 +18,7 @@ it.each(['cancel', 'filter error', 'allocation error'])('releases an unfinished 
     free, group: (targets: Target[]) => ({ ...targets[0] }), freePair: vi.fn(), bind: vi.fn(), draw: vi.fn(),
   };
   const maps = new SpatialTiles(g as unknown as Gpu, { set: vi.fn() } as unknown as Program);
-  const work = maps.render(100, 80, 20, 32, true, function* () {
+  const work = maps.render(100, 80, 20, 32, 'rgb', function* () {
     g.clip = { ...clip, x: 50 };
     if (reason === 'filter error') throw Error('filter failed');
     yield;

@@ -106,6 +106,8 @@ export interface Source {
   capture?: Capture;
   /** Internal: this source already contains noise reduction and whole-source capture sharpening. */
   captureApplied?: boolean;
+  /** Internal: a strip readback reuses the already corrected early-stage source. */
+  lensApplied?: boolean;
   /** Which photo this is (its path), so the view can stand in one of its sources for another. */
   origin?: string;
   /**
@@ -183,6 +185,7 @@ interface DehazeTargets {
   split: Target;
   guide: Target;
 }
+type DehazeMask = { slot: number; strength: number; key: string; maskKey: string };
 
 /** The clarity filter's pyramids, from full size down: remapped images (A: levels 0-3, B: 4-5 and the lightness), and the output.
  *  With detail before Exposure, ten levels (LOG_GAMMAS): A 0-3, B 4-7, C 8-9 and the lightness. */
@@ -351,6 +354,9 @@ class Lane {
   ceLookMade: { tex: WebGLTexture; key: string } | null = null;
   ceTiles: SpatialTiles | null = null;
   usmTiles: SpatialTiles | null = null;
+  textureTiles: SpatialTiles | null = null;
+  dehazeTiles: SpatialTiles[] = [];
+  dehazeTiled: { input: WebGLTexture; key: string; out: Target } | null = null;
   /** Bounded live colour keeps its working images when the exact preview is rendered. */
   ceDraft: ColorCache | null = null;
   noiseMade: { input: WebGLTexture; amount: number; out: Target } | null = null;
@@ -774,7 +780,7 @@ export class Engine {
     if (L.printGroup) g.freePair(L.printGroup.t);
     L.printGroup = L.printMade = null;
     if (L.ce) { g.freePair(L.ce.pair); L.ce.t.forEach((t) => g.free(t)); }
-    L.ceTiles?.release(); L.usmTiles?.release();
+    L.ceTiles?.release(); L.usmTiles?.release(); L.textureTiles?.release();
     if (L.ceDraft?.ce) { g.freePair(L.ceDraft.ce.pair); L.ceDraft.ce.t.forEach((t) => g.free(t)); }
     L.ceDraft = null;
     if (L.ceDelta) g.free(L.ceDelta);
@@ -797,6 +803,7 @@ export class Engine {
   }
 
   private freeDehaze() {
+    this.L.dehazeTiles.forEach(t => t.release()); this.L.dehazeTiled = null;
     if (this.L.dh) this.freeDehazeTargets(this.L.dh);
     if (this.L.dhLive) this.freeDehazeTargets(this.L.dhLive);
     this.L.dhMasked.forEach((d) => this.freeDehazeTargets(d));
@@ -824,7 +831,7 @@ export class Engine {
     const g = this.gpu;
     // Every input unit is bound, unused ones to black: a target left bound would be a feedback loop.
     (['I', 'A', 'B', 'C', 'D'] as const).forEach((k, unit) => g.bind(unit, tex[k] ?? g.blackTexture));
-    this.dehazeGfP.set({ uI: 0, uA: 1, uB: 2, uC: 3, uD: 4, uDir: [1, 0], uMin: 0, uEps: SQRT_EPS * SQRT_EPS, uPrevOn: 0, uWeighted: 0, uGfScale: 1, ...extra, uMode: mode });
+    this.dehazeGfP.set({ uI: 0, uA: 1, uB: 2, uC: 3, uD: 4, uPrevTail: 5, uPrevSplit: 0, uPrevRect: [0, 0, 1, 1], uDir: [1, 0], uMin: 0, uEps: SQRT_EPS * SQRT_EPS, uPrevOn: 0, uWeighted: 0, uGfScale: 1, ...extra, uMode: mode });
     g.draw(this.dehazeGfP, to, w, h);
   }
 
@@ -843,7 +850,7 @@ export class Engine {
     const t2 = prev ? g.target(aw, ah, true, true) : null;
     try {
       g.bind(0, src.tex);
-      this.dehazeP.set({ ...u, uSrc: 0 });
+      this.dehazeP.set({ ...u, uSrc: 0, uInputRect: [0, 0, 1, 1] });
       g.draw(this.dehazeP, t, aw, ah);
       if (t2) this.dehazeStep(aw, ah, 9, t2, { I: t.tex, A: prev!.tex });
       const px = new Float32Array(aw * ah * 4);
@@ -957,9 +964,18 @@ export class Engine {
    */
 
 
-  private *dehazeMapSteps(src: Source, u: Uniforms, photoOn: boolean, masked: { slot: number; strength: number; key: string; maskKey: string }[], maskTap: (slot: number, prev: Target | null, to: Target) => void): Generator<void, WebGLTexture> {
+  private *dehazeMapSteps(src: Source, u: Uniforms, photoOn: boolean, masked: DehazeMask[], maskTap: (slot: number, prev: Target | null, to: Target) => void): Generator<void, WebGLTexture> {
     const g = this.gpu;
     const { w, h } = src;
+    if (!src.roi && w * h > this.spatialTilePixels) {
+      const key = `${w}x${h}|${pick(u, ['uInputMode', 'uToWorking', 'uSigN', 'uDehazeStrength', 'uDehazeDistance'])}|${photoOn}|${JSON.stringify(masked)}`;
+      if (this.L.dehazeTiled?.input !== src.tex || this.L.dehazeTiled.key !== key) {
+        const out = yield* this.dehazeTileSteps(src, u, photoOn, masked, maskTap);
+        this.L.dehazeTiled = { input: src.tex, key, out };
+      }
+      u.uDehazeOn = 1; u.uDehazeKey = hashKey(key);
+      return this.L.dehazeTiled.out.tex;
+    }
     if (!this.L.dh || this.L.dh.w !== w || this.L.dh.h !== h) {
       yield* this.reserveSteps([...Array.from({ length: 6 }, (): SpareSpec => [w, h, true, true, false]),
         ...Array.from({ length: 3 }, (): SpareSpec => [w, h, true, true, true])]);
@@ -969,7 +985,7 @@ export class Engine {
     if (d0.input !== src.tex || d0.inputKey !== inputKey) {
       // The module's input: the source after the input stage.
       g.bind(0, src.tex);
-      this.dehazeP.set({ ...u, uSrc: 0 });
+      this.dehazeP.set({ ...u, uSrc: 0, uInputRect: [0, 0, 1, 1] });
       g.draw(this.dehazeP, d0.I, w, h);
     yield;
       d0.input = src.tex;
@@ -1032,6 +1048,61 @@ export class Engine {
     // A hash: uniforms hold numbers. The map keys pick it up.
     u.uDehazeKey = hashKey(chain);
     return prev ? (prev as Target).tex : g.blackTexture;
+  }
+
+  /** Each full-density affine instance reads the preceding one, with bounded filter scratch. */
+  private *dehazeTileSteps(src: Source, u: Uniforms, photoOn: boolean, masked: DehazeMask[], maskTap: (slot: number, prev: Target | null, to: Target) => void): Generator<void, Target> {
+    const L = this.L, g = this.gpu, clip = g.clip;
+    L.dehazeTiled = null; L.dehazeTiles.forEach(t => t.release());
+    let scratch: DehazeTargets | null = null, previous: Target | null = null, complete = false;
+    const { w1, w2 } = windows(pxScale(src));
+    const instances = [...(photoOn ? [{ slot: -1, strength: u.uDehazeStrength as number }] : []), ...masked];
+    try {
+      g.clip = null;
+      for (const [index, instance] of instances.entries()) {
+        const prev: Target | null = previous;
+        const ambient: { A0: [number, number, number]; distanceMax: number } = instance.slot < 0 ? this.dehazeAmbient(src, u)
+          : this.inject?.maskedAmbient?.get(instance.slot) ?? this.dehazeMeasure(src, u, prev);
+        const tiles = L.dehazeTiles[index] ??= new SpatialTiles(g, this.tileCopyP);
+        previous = yield* tiles.render(src.w, src.h, 2 * w1 + 3 * w2, Math.min(SPATIAL_TILE_CORE, Math.floor(Math.sqrt(this.spatialTilePixels))), 'rgba',
+          function* (this: Engine, tile: Tile): Generator<void, Target> {
+            const d = scratch = this.dehazeTargets(scratch, tile.pw, tile.ph);
+            const rect = [tile.px / src.w, tile.py / src.h, tile.pw / src.w, tile.ph / src.h];
+            g.bind(0, src.tex);
+            this.dehazeP.set({ ...u, uSrc: 0, uInputRect: rect });
+            g.draw(this.dehazeP, prev ? d.F : d.I, d.w, d.h);
+            yield;
+            const prevUniforms = { uPrevOn: prev ? 1 : 0, uPrevSplit: prev?.blue ? 1 : 0, uPrevRect: rect };
+            if (prev) {
+              g.bind(5, prev.blue?.tex ?? g.blackTexture);
+              this.dehazeStep(d.w, d.h, 8, d.I, { I: d.F.tex, A: prev.tex }, prevUniforms);
+              yield;
+            }
+            // The source/full ratio remains the whole photo's, not the tile's dimensions.
+            const local = { ...src, w: d.w, h: d.h, roi: { x: rect[0], y: rect[1], w: rect[2], h: rect[3] } };
+            d.guideKey = d.abKey = '';
+            yield* this.dehazeTransmissionSteps(d, local, ambient.A0, instance.strength, `${index}:${tile.px}:${tile.py}`);
+            if (instance.slot >= 0) {
+              d.r1.area = { x: tile.px, y: tile.py, w: d.w, h: d.h, fullW: src.w, fullH: src.h };
+              maskTap(instance.slot, prev, d.r1);
+            }
+            g.bind(5, prev?.blue?.tex ?? g.blackTexture);
+            this.dehazeStep(d.w, d.h, 7, d.F, { I: d.I.tex, A: prev?.tex, B: d.s1.tex, C: d.r1.tex }, {
+              ...prevUniforms, uA0: ambient.A0, uTmin: minTransmission(u.uDehazeDistance as number, ambient.distanceMax),
+              uGfScale: Math.abs(instance.strength), uWeighted: instance.slot >= 0 ? 1 : 0,
+            });
+            yield;
+            return d.F;
+          }.bind(this));
+        if (index) L.dehazeTiles[index - 1].release();
+      }
+      complete = true;
+      return previous!;
+    } finally {
+      if (scratch) this.freeDehazeTargets(scratch);
+      g.clip = clip;
+      if (!complete) L.dehazeTiles.forEach(t => t.release());
+    }
   }
 
   /** Give a RAW source its capture sharpening data: the radius, the camera matrix and the clip mask at the source's size. */
@@ -1626,6 +1697,10 @@ export class Engine {
     // Tiled outputs belong to the source render, rather than the scratch tile's dimensions.
     if (this.L.ceTiles?.releaseSize(w, h)) this.L.ceMade = null;
     if (this.L.usmTiles?.releaseSize(w, h)) this.L.usmMade = null;
+    if (this.L.textureTiles?.releaseSize(w, h)) this.L.eqMade = null;
+    if (this.L.dehazeTiled?.out.w === w && this.L.dehazeTiled.out.h === h) {
+      this.L.dehazeTiles.forEach(t => t.release()); this.L.dehazeTiled = null;
+    }
     for (const [slot, b] of this.L.textureBoundaries) if (b.source.w === w && b.source.h === h) {
       this.gpu.free(b.target); this.L.textureBoundaries.delete(slot);
     }
@@ -1946,7 +2021,7 @@ export class Engine {
       const reach = (kernel.length - 1) / 2 + (gaussian1d(2).length - 1) / 2 + 2;
       try {
         this.gpu.clip = null;
-        return yield* tiles.render(w, h, reach, Math.min(SPATIAL_TILE_CORE, Math.floor(Math.sqrt(this.spatialTilePixels))), false,
+        return yield* tiles.render(w, h, reach, Math.min(SPATIAL_TILE_CORE, Math.floor(Math.sqrt(this.spatialTilePixels))), 'rg',
           function* (this: Engine, tile: Tile) {
             return yield* this.usmSteps(tile.pw, tile.ph, p, kernel, t => {
               t.area = { x: tile.px, y: tile.py, w: tile.pw, h: tile.ph, fullW: w, fullH: h };
@@ -2035,7 +2110,7 @@ export class Engine {
     try {
       g.clip = null;
       // darktable colorequal's overlap (also used by regionReach), per sequential instance.
-      return yield* tiles.render(w, h, 20 * colors.length, Math.min(SPATIAL_TILE_CORE, Math.floor(Math.sqrt(this.spatialTilePixels))), true,
+      return yield* tiles.render(w, h, 20 * colors.length, Math.min(SPATIAL_TILE_CORE, Math.floor(Math.sqrt(this.spatialTilePixels))), 'rgb',
         function* (this: Engine, tile: Tile) {
           let out: Target | null = null;
           for (const color of colors) {
@@ -2313,6 +2388,27 @@ export class Engine {
 
 
   private *textureDeltaSteps(src: Source, photoMix: number | null, masked: Masked[], drawInput: (t: Target, slot: number, acc: Target | null) => void, collectCoarse = true, photoKey = ''): Generator<void, Target> {
+    if (!src.roi && !collectCoarse && src.w * src.h > this.spatialTilePixels) {
+      const L = this.L, saved = { eq: L.eq, eqPhoto: L.eqPhoto }, g = this.gpu, clip = g.clip;
+      L.eq = null; L.eqPhoto = null; L.eqMade = null;
+      const tiles = L.textureTiles ??= new SpatialTiles(g, this.tileCopyP);
+      const reach = 2 * scales(src.w, src.h, src.fullW, src.fullH, 1).reduce((sum, s) => sum + s.mult, 0)
+        * (Number(photoMix !== null) + masked.length);
+      try {
+        g.clip = null;
+        return yield* tiles.render(src.w, src.h, reach, Math.min(SPATIAL_TILE_CORE, Math.floor(Math.sqrt(this.spatialTilePixels))), 'r',
+          function* (this: Engine, tile: Tile) {
+            L.eqPhoto = null;
+            const local = { ...src, w: tile.pw, h: tile.ph,
+              roi: { x: tile.px / src.w, y: tile.py / src.h, w: tile.pw / src.w, h: tile.ph / src.h } };
+            const result = yield* this.textureDeltaSteps(local, photoMix, masked, (t, slot, acc) => {
+              t.area = { x: tile.px, y: tile.py, w: tile.pw, h: tile.ph, fullW: src.w, fullH: src.h };
+              drawInput(t, slot, acc);
+            }, false);
+            return result;
+          }.bind(this));
+      } finally { this.freeEq(); Object.assign(L, saved); g.clip = clip; }
+    }
     if (!src.roi) {
       const active = new Set([...(photoMix !== null ? [-1] : []), ...masked.map(m => m.slot)]);
       for (const [slot, b] of this.L.textureBoundaries) if (!active.has(slot)) { this.gpu.free(b.target); this.L.textureBoundaries.delete(slot); }
@@ -2582,6 +2678,7 @@ export class Engine {
   }
 
   private lensCorrected(src: Source, recipe: Recipe | null): Source {
+    if (src.lensApplied) return src;
     if (src.mode !== InputMode.SceneLinear || !src.lens?.correction || !this.gpu.hdr) return src;
     const [W, H] = wholeSize(src);
     const model = lensSpline(src.lens.correction, W, H, recipe?.lens ?? null);
@@ -2837,6 +2934,8 @@ export class Engine {
       maskShow?: number | null;
       /** Dither amplitude, one step of the output's depth (1/255 unless set; 1/65535 for 16-bit). */
       dither?: number;
+      /** Early-stage source shared by consecutive export readback strips. */
+      preparedInput?: { source?: Source };
       /** Draw, instead of the photo, the scene this mask (its index) adjusts at its exposure instance. */
       pick?: number;
       /**
@@ -2881,6 +2980,7 @@ export class Engine {
     },
   ): Generator<void> {
     const g = this.gpu;
+    if (opts.preparedInput?.source) src = opts.preparedInput.source;
     // Live colour uses a small, persistent set of float targets. Swapping just these fields
     // keeps all the other preview maps and the exact colour targets in their existing lane.
     if (opts.products && (opts.live || opts.warm === 'color') && !this.inColorDraft) {
@@ -2993,6 +3093,21 @@ export class Engine {
     const iterations = recipe && !opts.compare && !src.captureApplied && !denoiseDragged && src.capture && g.hdr && g.float32 ? iterationsFor(recipe.captureSharpening) : 0;
     if (iterations > 0) src = { ...src, tex: (yield* this.captureSteps(src, iterations, this.L)) };
     src = this.lensCorrected(src, recipe);
+    if (opts.preparedInput && !opts.preparedInput.source)
+      opts.preparedInput.source = { ...src, captureApplied: true, lensApplied: true };
+    const largeStill = src.w * src.h > this.spatialTilePixels && opts.target !== 'screen' && !opts.products && !opts.whole && !src.roi;
+    if (largeStill) {
+      // Still renders keep only the final early-stage source. Earlier noise/capture copies
+      // are no longer read by downstream filters; another render can rebuild them if needed.
+      for (const key of ['noiseMade', 'profMade'] as const) {
+        const out = this.L[key]?.out;
+        if (out && out.tex !== src.tex) { g.free(out); this.L[key] = null; }
+      }
+      if (this.L.csOut && this.L.csOut.tex !== src.tex) {
+        g.free(this.L.csOut); this.L.csOut = null; this.L.csMade = null;
+      }
+      this.denoiser?.dispose();
+    }
     // The masks' raster layers: brushes, and refined masks (drawn below, once the uniforms are
     // known). One texture array, bound to MASK_UNIT just before each draw that reads it.
     const packed = recipe && !opts.compare ? packShapes(recipe.masks, opts.maskShow ?? -1).index : [];
@@ -3133,6 +3248,8 @@ export class Engine {
       u.uMaskLocal = local;
     }
     let dehaze: WebGLTexture = g.blackTexture;
+    let dehazeTail: WebGLTexture = g.blackTexture;
+    u.uDehazeSplit = 0; u.uDehazeTail = 15;
     u.uDehazeOn = 0;
     // The products of a region render need the dehazed whole photo only for the tone equalizer's
     // map and the highlights (halation, glow); otherwise just haze removal's ambient light.
@@ -3178,10 +3295,11 @@ export class Engine {
           g.bind(0, src.tex);
           for (const unit of [1, 2, 3, 4, 5, 6, 8, 9, 10]) g.bind(unit, g.blackTexture);
           g.bind(DEHAZE_UNIT, prev?.tex ?? g.blackTexture);
+          g.bind(15, prev?.blue?.tex ?? g.blackTexture);
           g.bind3d(LUT_UNIT, lutTex);
           this.develop.set({
-            ...u, uSrc: 0, uBlurTex: 1, uHalTex: 2, uGlowTex: 3, uTeqTex: 4, uTeqLocal: 0, uCurveTex: 5, uClarityTex: 6, uTextureTex: 8, uUsmTex: 9, uCeTex: 10, uDehazeTex: DEHAZE_UNIT, uDehazeOn: prev ? 1 : 0,
-            uView: [0, 0, 1, 1], ...tapGeo, uSplit: -1, uClipShow: 0, uUsmOn: 0, uUsmShowMask: 0, uCeOn: 0, uTextureOn: 0, uClarityOn: 0, uTap, uTapMask: slot, uMaskTap: -1,
+            ...u, uSrc: 0, uBlurTex: 1, uHalTex: 2, uGlowTex: 3, uTeqTex: 4, uTeqLocal: 0, uCurveTex: 5, uClarityTex: 6, uTextureTex: 8, uUsmTex: 9, uCeTex: 10, uDehazeTex: DEHAZE_UNIT, uDehazeOn: prev ? 1 : 0, uDehazeSplit: prev?.blue ? 1 : 0,
+            uView: t.area ? [t.area.x / t.area.fullW, t.area.y / t.area.fullH, t.area.w / t.area.fullW, t.area.h / t.area.fullH] : [0, 0, 1, 1], ...tapGeo, uSplit: -1, uClipShow: 0, uUsmOn: 0, uUsmShowMask: 0, uCeOn: 0, uTextureOn: 0, uClarityOn: 0, uTap, uTapMask: slot, uMaskTap: -1,
           });
           g.bindArray(MASK_UNIT, maskTex);
           g.draw(this.develop, t, t.w, t.h);
@@ -3190,6 +3308,10 @@ export class Engine {
         draw(to, 10);
       });
     }
+    if (this.L.dehazeTiled?.out.tex === dehaze) {
+      dehazeTail = this.L.dehazeTiled.out.blue!.tex; u.uDehazeSplit = 1;
+    }
+    g.bind(15, dehazeTail);
     if (opts.products && u.uDehazeOn === 1) opts.products.dehazeMap = { tex: dehaze, key: u.uDehazeKey as number };
     if (opts.warm === 'dehaze' || opts.prepare === 'dehaze') {
       // A region measures nothing itself: it takes the whole photo's ambient light.
@@ -3236,7 +3358,7 @@ export class Engine {
     const ll = needsLl ? this.llPyramids(src.w, src.h, src.roi ? 4 : undefined, detailLog) : null;
     // Texture needs float targets and at least one wavelet scale.
     const eqOn = !picking && (passes.texture || maskTexture.length > 0) && g.hdr && scales(...wholeSize(src), src.fullW, src.fullH, 1).length > 0;
-    if (eqOn && !directPreview) {
+    if (eqOn && !directPreview && !largeStill) {
       if (!this.L.eq || this.L.eq.w !== src.w || this.L.eq.h !== src.h)
         yield* this.reserveSteps([...Array.from({ length: 2 }, (): SpareSpec => [src.w, src.h, true, g.float32, false]),
           ...Array.from({ length: 4 }, (): SpareSpec => [src.w, src.h, true, g.float32, true])]);
@@ -3377,6 +3499,7 @@ export class Engine {
       g.bind(10, ceTex);
       g.bind(14, ceBlue);
       g.bind(DEHAZE_UNIT, dehaze);
+      g.bind(15, dehazeTail);
       g.bind3d(LUT_UNIT, lutTex);
     };
     // A pass over the whole source that stops at a filter's input (see uTap in develop.frag).
@@ -3384,7 +3507,7 @@ export class Engine {
       this.develop.set({
         ...u, ...teqU, uSrc: 0, uBlurTex: 1, uHalTex: 2, uGlowTex: 3, uClarityTex: 6, uTextureTex: 8, uUsmTex: 9,
         uDehazeTex: DEHAZE_UNIT, uView: t.area ? [t.area.x / t.area.fullW, t.area.y / t.area.fullH, t.area.w / t.area.fullW, t.area.h / t.area.fullH] : [0, 0, 1, 1], ...tapGeo,
-        uSplit: -1, uClipShow: 0, uUsmOn: 0, uUsmShowMask: 0, uCeTex: 10, uCeBlue: 14, uCeSplit: ceBlue !== g.blackTexture ? 1 : 0, uCeOn: ceMode, uTap, ...extra,
+        uSplit: -1, uClipShow: 0, uUsmOn: 0, uUsmShowMask: 0, uTextureTile: [0, 0, 1, 1], uCeTex: 10, uCeBlue: 14, uCeSplit: ceBlue !== g.blackTexture ? 1 : 0, uCeOn: ceMode, uTap, ...extra,
       });
       g.bindArray(MASK_UNIT, maskTex);
       g.draw(this.develop, t, t.w, t.h);
@@ -3467,7 +3590,8 @@ export class Engine {
         if (slot < 0) tap(t, 2, { uTextureOn: 0, uClarityOn: 0 });
         else {
           g.bind(8, acc?.tex ?? g.blackTexture);
-          tap(t, 7, { uTextureOn: acc ? 1 : 0, uClarityOn: 0, uTapMask: slot });
+          tap(t, 7, { uTextureOn: acc ? 1 : 0, uClarityOn: 0, uTapMask: slot,
+            uTextureTile: t.area ? [t.area.x / t.area.fullW, t.area.y / t.area.fullH, t.area.w / t.area.fullW, t.area.h / t.area.fullH] : [0, 0, 1, 1] });
         }
       }, collectCoarse, photoTextureKey);
       this.L.eqMade = { tex: src.tex, key: textureKey, own: textureOwn, out, coarse: collectCoarse };
@@ -3645,7 +3769,7 @@ export class Engine {
     }
     try {
       this.develop.set({
-      ...u, ...teqU, uSrc: 0, uBlurTex: 1, uHalTex: 2, uGlowTex: 3, uClarityTex: 6, uTextureTex: 8, uUsmTex: 9, uCeTex: 10, uCeBlue: 14, uCeSplit: !displayColor && ceBlue !== g.blackTexture ? 1 : 0, uDehazeTex: DEHAZE_UNIT, uCeOn: displayColor ? 2 : ceMode, uCeRoi: displayColor ? [0, 0, 1, 1] : u.uCeRoi ?? [0, 0, 1, 1], uTap: 0, uClarityOn: ll || previewClarity ? 1 : 0, uTextureOn: eqOn ? 1 : 0,
+      ...u, ...teqU, uSrc: 0, uBlurTex: 1, uHalTex: 2, uGlowTex: 3, uClarityTex: 6, uTextureTex: 8, uUsmTex: 9, uTextureTile: [0, 0, 1, 1], uCeTex: 10, uCeBlue: 14, uCeSplit: !displayColor && ceBlue !== g.blackTexture ? 1 : 0, uDehazeTex: DEHAZE_UNIT, uCeOn: displayColor ? 2 : ceMode, uCeRoi: displayColor ? [0, 0, 1, 1] : u.uCeRoi ?? [0, 0, 1, 1], uTap: 0, uClarityOn: ll || previewClarity ? 1 : 0, uTextureOn: eqOn ? 1 : 0,
       uUsmOn: usmOn ? 1 : 0, uUsmShowMask: usmOn && opts.sharpenMask ? 1 : 0,
       });
       g.bindArray(MASK_UNIT, maskTex);
@@ -3836,11 +3960,12 @@ export class Engine {
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buffer);
       gl.bufferData(gl.PIXEL_PACK_BUFFER, strip.byteLength, gl.STREAM_READ);
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
-      const started = performance.now();
+      const preparedInput: { source?: Source } = {};
       for (let y0 = 0; y0 < height; y0 += rows) {
         const n = Math.min(rows, height - y0);
-        this.render(src, recipe, { target: out, width, height: rows, seed, frame, dither: 1 / 65535,
+        this.render(src, recipe, { target: out, width, height: rows, seed, frame, dither: 1 / 65535, preparedInput,
           view: { x: 0, y: y0 / height, w: 1, h: rows / height } });
+        const started = performance.now();
         gl.bindFramebuffer(gl.FRAMEBUFFER, out.fbo);
         gl.bindBuffer(gl.PIXEL_PACK_BUFFER, buffer);
         gl.readPixels(0, 0, width, n, gl.RGBA, gl.FLOAT, 0);

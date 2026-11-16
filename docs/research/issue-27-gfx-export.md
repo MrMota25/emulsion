@@ -29,12 +29,11 @@ each is about 1.63 GB at this source size.
 - Failed export frames reach the persistent error reporter. Worker replies keep
   their stack, and failed render-target allocation reports format/GL/FBO status.
 
-This checkpoint fixes the demonstrated default-look and AI-denoise failures.
-**Full-resolution Dehaze and Texture still need separate tiling.** That broader
-work is intentionally outside this commit, in `/Users/oli/Dev/emulsion-gfx-export`
-on `fix/gfx-large-images`. Do not close #27 as universally solved or merge that
-work without resolving its masked-Texture regression. No resolution reduction,
-undenoised fallback, or preview-map approximation was introduced here.
+Core checkpoint `0636871` fixes the demonstrated default-look and AI-denoise
+failures. The follow-up on `fix/gfx-large-images` adds exact Texture/Dehaze tiling,
+fixes the masked-Texture regression, and preserves Remove edits across 16-bit
+strips. Heavy masked edits can still exceed WebKit's memory limit; see below.
+No resolution reduction, undenoised fallback, or preview-map approximation is used.
 
 ## Validation
 
@@ -85,3 +84,21 @@ node .scratch/issue-27/wk.mjs 'capture&noise'
 `EMULSION_NOISE_RAW`, `EMULSION_DENOISE_ASSETS` and optional
 `EMULSION_NOISE_FULL_DUMP` for real inference and export payload extraction.
 These ignored native tests use scratch data and do not change original photos.
+
+## Follow-up on 2026-11-16
+
+The broader Texture/Dehaze branch now fixes the masked-Texture border regression:
+the develop pass samples the source before the off-image early return so implicit
+mipmap derivatives remain defined. The 12-case whole/tiled GPU comparison passes;
+removing this fix makes four cases fail by 38–42/255. The still renderer also keeps
+the Remove context for every 16-bit strip; the queued multi-strip pixel regression
+went from 59160/65535 error to zero.
+
+Actual GFX AI + capture 16-bit/8-bit comparison passes in WK (max diff one 8-bit
+step); full-sensor RGB16 passes in Chrome (611,975,112 bytes). Chrome also passes
+Texture + masked Texture + Dehaze + Clarity. That heavy combination still causes
+WebKit `ExceededMemoryLimit` without instrumentation, despite one passing traced
+run; its ~10.02 GB logical texture peak is not a resident-memory measurement.
+See [the current handoff](../plans/gfx-large-images-handoff.md) for exact commands,
+red/green artifacts, reverted probes and the remaining native memory blocker.
+The original diagnosis below is retained as historical evidence.

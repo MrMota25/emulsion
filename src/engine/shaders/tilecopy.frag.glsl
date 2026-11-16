@@ -9,5 +9,5 @@ layout(location = 1) out vec4 outBlue;
 void main() {
   vec4 p = texelFetch(uTex, ivec2(gl_FragCoord.xy) - uOffset, 0);
   outColor = p;
-  outBlue = vec4(p.b, 0.0, 0.0, 1.0);
+  outBlue = vec4(p.ba, 0.0, 1.0);
 }
