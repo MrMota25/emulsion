@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
 import { defaultRecipe } from '../film/recipe';
-import { toneCurveFor, packCurve } from './tone';
+import { toneCurveFor, packCurve, sigmoidCurve, NEUTRAL } from './tone';
 import { InputMode, developUniforms, needsPasses } from './params';
 import { DEFAULT_FUJI_SIM, fujiLookSettings, withFujiLook } from '../film/fujilooks';
 import { FUJI_NEUTRAL } from '../film/fujirecipe';
@@ -10,8 +10,8 @@ import type { Mat3 } from '../film/stocks';
 const ctx = { width: 1600, height: 1067, seed: 3, inputMode: InputMode.DisplayLinear, store: 1 };
 
 describe('develop uniforms', () => {
-  it('routes new HDR controls through one adaptive stage and leaves the legacy controls independent', () => {
-    for (const key of ['shadows', 'highlights', 'blacks', 'whites'] as const) {
+  it('routes broad HDR controls through the adaptive stage and leaves legacy controls independent', () => {
+    for (const key of ['shadows', 'highlights', 'whites'] as const) {
       const r = { ...defaultRecipe('neutral'), [key]: 50 };
       const u = developUniforms(r, ctx);
       expect(u.uToneOn).toBe(1);
@@ -25,6 +25,26 @@ describe('develop uniforms', () => {
     expect(mixed.uToneOn).toBe(1);
     expect(mixed.uTeqLegacy).toBe(1);
     expect(mixed.uExpBlack).toBeCloseTo(0.0032, 8);
+  });
+  it('opens adaptive near-blacks with anchored sigmoid contrast and retains legacy target lift', () => {
+    for (const blacks of [25, 50, 100]) {
+      const u = developUniforms({ ...defaultRecipe('neutral'), blacks }, ctx);
+      expect(u.uToneBlack).toBe(0);
+      expect(u.uToneOn).toBe(0);
+      expect(needsPasses(u).toneEqualizer).toBe(false);
+      expect(u.uSigS).toEqual(packCurve(toneCurveFor(0, 0)));
+      expect((u.uBlackToe as number[])[0]).toBe(60 / 255);
+      expect(u.uBlackToeCurve).toEqual(packCurve(sigmoidCurve({ ...NEUTRAL, contrast: NEUTRAL.contrast * (1 - 0.5 * blacks / 100) })));
+      const legacy = developUniforms({ ...defaultRecipe('neutral'), blacks, toneVersions: undefined }, ctx);
+      expect(legacy.uSigS).toEqual(packCurve(toneCurveFor(0, blacks)));
+      expect((legacy.uBlackToe as number[])[0]).toBe(0);
+    }
+    const extended = developUniforms({ ...defaultRecipe('neutral'), blacks: 200 }, ctx);
+    expect(extended.uBlackToeCurve).toEqual(packCurve(sigmoidCurve({ ...NEUTRAL, contrast: NEUTRAL.contrast * 0.25 })));
+    const down = developUniforms({ ...defaultRecipe('neutral'), blacks: -100 }, ctx);
+    expect(down.uToneOn).toBe(1);
+    expect(down.uToneBlack).toBeLessThan(0);
+    expect(down.uExpBlack).toBe(0);
   });
   it("applies a look LUT at the recipe's Amount, with the stock's own colour switched off", () => {
     const lut = { level: 2, data: new Float32Array(24), id: 7, eightBit: true };
