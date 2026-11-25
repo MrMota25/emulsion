@@ -1,0 +1,36 @@
+# Personal build for a fork: builds an ad-hoc-signed Apple Silicon app from this branch, with no
+# update signing key, and keeps the .dmg as a run artifact to download. Not for the upstream repo.
+name: Personal Mac build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install libomp
+        run: brew install libomp
+      - run: npm ci
+      - run: npx vitest run
+      - name: Build
+        run: npx tauri build --target aarch64-apple-darwin --bundles app,dmg --config '{"bundle":{"createUpdaterArtifacts":false}}'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: emulsion-mac
+          path: src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/*.dmg
