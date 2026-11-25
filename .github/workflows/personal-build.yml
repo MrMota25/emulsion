@@ -3,6 +3,8 @@
 name: Personal Mac build
 
 on:
+  push:
+    branches: [eddie-mac-build]
   workflow_dispatch:
 
 permissions:
