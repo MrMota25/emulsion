@@ -192,7 +192,7 @@ function ImportTile({ photo, checked, disabled, toggle, range }: { photo: Photo;
   return <label ref={ref} className={`import-tile${checked ? ' checked' : ''}${disabled ? ' imported' : ''}`} title={photo.pair ? `${photo.name} + ${photo.pair.split(/[\\/]/).pop()}` : photo.name} onClick={range}>
     <div className="import-thumb"><Thumb photo={photo} visible={visible} />{disabled && <span className="imported-badge">In library</span>}</div>
     <span><input type="checkbox" aria-label={`Import ${photo.name}`} disabled={disabled} checked={checked} onChange={toggle} /><span className="import-tile-name">{photo.name}</span>{photo.pair && <span className="pair-tag">RAW+JPEG</span>}</span>
-    <ExposureInfo photo={photo} visible={visible} />
+    <ExposureInfo photo={photo} visible={visible} reserve />
   </label>;
 }
 
@@ -217,6 +217,8 @@ export function FolderImportView() {
   // after every render picked the next window from it, which could alternate between two rows
   // forever once the import had scrolled a few hundred photos, and React stopped the interface
   // with Maximum update depth exceeded.
+  // Tiles keep one height while their thumbnails and capture settings load (ExposureInfo reserves its
+  // line), so the first measurement stays right.
   useLayoutEffect(() => {
     const el = grid.current; if (!el) return;
     const css = getComputedStyle(el);

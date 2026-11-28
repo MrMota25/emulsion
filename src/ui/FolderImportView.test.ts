@@ -3,7 +3,9 @@
 import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
-vi.mock('./ExposureInfo', () => ({ ExposureInfo: () => null }));
+// Tiles must reserve the capture settings line: the grid measures a tile once, before the settings load.
+const exposure = vi.hoisted(() => ({ unreserved: 0 }));
+vi.mock('./ExposureInfo', () => ({ ExposureInfo: ({ reserve }: { reserve?: boolean }) => { if (!reserve) exposure.unreserved++; return null; } }));
 vi.mock('./common', async original => ({ ...await original<typeof import('./common')>(), Thumb: () => null }));
 import { FolderImportView } from './Folders';
 import { useApp, type Photo } from '../library/store';
@@ -52,9 +54,10 @@ it('settles at every scroll position once rows measure a pixel apart', async () 
   // re-measured after each render and stopped with Maximum update depth exceeded near photo 185.
   for (let top = 0; top < 200 * (TILE + GAP); top += 175) {
     await act(async () => { scroll.scrollTop = top; scroll.dispatchEvent(new Event('scroll')); });
-      expect(host.querySelectorAll('.import-tile').length).toBeGreaterThan(0);
+    expect(host.querySelectorAll('.import-tile').length).toBeGreaterThan(0);
     expect(host.querySelectorAll('.import-tile').length).toBeLessThan(80);
   }
+  expect(exposure.unreserved).toBe(0);
 });
 
 it('remeasures after resizing the window or changing the thumbnail size', async () => {
